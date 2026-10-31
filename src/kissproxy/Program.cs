@@ -83,6 +83,8 @@ builder.Services.AddLogging(logging =>
     logging.ClearProviders();
     logging.AddConsole();
     logging.SetMinimumLevel(LogLevel.Information);
+    // Per-request lines from the web UI's polling would bury the frame log
+    logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
 });
 // Reduce shutdown timeout so SSE connections don't block exit for 30 seconds
 builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(5));

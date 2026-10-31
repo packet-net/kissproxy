@@ -31,9 +31,13 @@ kissproxylib is a .NET library version which can be used to integrate a KISS pro
 - **TX Test frame parsing**: automatically extracts and displays NinoTNC status information
 - **Persist to flash option**: choose whether mode changes are temporary or saved to TNC flash
 
+### Frame Log
+- **One line per AX.25 frame** to and from each modem, decoded in-process (AX.25, XID parameters, NET/ROM L3/L4 and NODES), in the console output, so `journalctl -u kissproxy` shows it
+- Lines look like `[6m] RX GB7WIN>M0LTE <RR C P R3>`; TX means handed to the modem, which is not proof it went on air
+
 ### MQTT Integration
 - **Frame tracing**: publish all KISS traffic to MQTT topics
-- **Multiple topic formats**: framed, unframed, and decoded (with ax2txt)
+- **Multiple topic formats**: framed, unframed, and decoded
 - **Per-modem topics**: organized by hostname, port, and direction
 
 ## Quick Start
@@ -120,7 +124,7 @@ Where `$direction` is `toModem` or `fromModem`.
 Sub-topics:
 - `/framed` - Raw KISS traffic with framing intact
 - `/unframed/$kissport/$kisscommand` - Unpacked frame data
-- `/decoded/$kissport` - Human-readable (requires ax2txt at /opt/ax2txt/ax2txt)
+- `/decoded/$kissport` - Human-readable, one line per frame, same text as the frame log
 
 ## Linux Installation
 

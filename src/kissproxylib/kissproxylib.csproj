@@ -17,7 +17,6 @@
     <PackageReference Include="MQTTnet.Extensions.ManagedClient" Version="4.3.7.1207" />
     <PackageReference Include="NAx25" Version="1.0.10" />
     <PackageReference Include="System.IO.Ports" Version="8.0.0" />
-    <PackageReference Include="cliwrap" Version="3.10.0" />
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 </Project>

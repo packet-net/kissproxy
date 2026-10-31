@@ -1,4 +1,3 @@
-using CliWrap;
 using kissproxy;
 using Microsoft.Extensions.Logging;
 using MQTTnet;
@@ -6,7 +5,6 @@ using MQTTnet.Client;
 using MQTTnet.Extensions.ManagedClient;
 using MQTTnet.Protocol;
 using NAx25;
-using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -512,6 +510,7 @@ public class KissProxy
         try
         {
             WriteToSerial(serialPort, kissFrame, 0, kissFrame.Length);
+            LogFrame("TX", kissFrame);
             return true;
         }
         catch (Exception ex)
@@ -674,6 +673,8 @@ public class KissProxy
 
     private void ProcessOutboundFrame(byte[] frame, bool emitAsBase64String)
     {
+        LogFrame("TX", frame);
+
         // Record in state
         var frameSummary = CreateFrameSummary(frame);
         var captureDetailedFrameInfo = modemState?.CaptureDetailedFrameInfo ?? false;
@@ -919,6 +920,9 @@ public class KissProxy
     {
         KissHelpers.ProcessBuffer(buffer, b, frame =>
         {
+            if (!outbound)
+                LogFrame("RX", frame);
+
             // Record in state
             if (!outbound && modemState != null)
             {
@@ -945,6 +949,29 @@ public class KissProxy
                 Task.Run(async () => await ProcessFrame(outbound, frame, emitAsBase64String));
             }
         });
+    }
+
+    /// <summary>
+    /// The frame log: one line per AX.25 frame to or from the modem. TX means handed
+    /// to the modem, not necessarily on air (an ACKMODE ack line shows that).
+    /// </summary>
+    private void LogFrame(string direction, byte[] kissFrame)
+    {
+        if (!logger.IsEnabled(LogLevel.Information))
+            return;
+
+        string? description;
+        try
+        {
+            description = Ax25Decoder.DescribeKissFrame(kissFrame);
+        }
+        catch (Exception ex)
+        {
+            description = $"decode failed ({ex.Message}), {kissFrame.Length} bytes";
+        }
+
+        if (description != null)
+            logger.LogInformation("{direction} {frame}", direction, description);
     }
 
     private bool ShouldProcessFrame(byte[] frame)
@@ -1023,9 +1050,9 @@ public class KissProxy
 
             if (commandCode == KissCommandCode.DataFrame || commandCode == KissCommandCode.AckMode)
             {
-                if (mqttClient != null || logger.IsEnabled(LogLevel.Debug))
+                if (mqttClient != null)
                 {
-                    description = await GetDescription(ax25Frame);
+                    description = Ax25Decoder.DescribeKissFrame(kissFrame);
                     if (description != null)
                     {
                         await EnqueueString($"{topic}/decoded/port{portId}/", description);
@@ -1036,100 +1063,7 @@ public class KissProxy
         catch (Exception ex)
         {
             logger.LogError("Exception: {message}", ex.Message);
-            return;
         }
-
-        if (!string.IsNullOrWhiteSpace(description))
-        {
-            logger.LogDebug("{direction} {bytes} bytes: {description}", outbound ? "outbound" : "inbound", kissFrame.Length, description);
-        }
-    }
-
-    private async Task<string?> GetDescription(byte[] frame)
-    {
-        const string prog = "/opt/ax2txt/ax2txt";
-
-        if (!File.Exists(prog))
-            return null;
-
-        if (frame == null || frame.Length == 0)
-            return null;
-
-        try
-        {
-            var buffer = new StringBuilder();
-
-            var cmd = frame
-                | Cli.Wrap(prog)
-                    .WithValidation(CommandResultValidation.None)
-                | PipeTarget.ToStringBuilder(buffer);
-
-            CommandResult execution;
-            var sw = Stopwatch.StartNew();
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-            try
-            {
-                execution = await cmd.ExecuteAsync(cts.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                sw.Stop();
-                string tmp = await SaveFrame(frame);
-                try
-                {
-                    logger.LogError("ax2txt took too long: {millis}ms, and was killed, data saved {path}", sw.ElapsedMilliseconds, tmp);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError("ax2txt took too long: {millis}ms, and was killed, got exception while saving data: {error}", sw.ElapsedMilliseconds, ex.Message);
-                }
-
-                return null;
-            }
-
-            if (!execution.IsSuccess)
-            {
-                try
-                {
-                    string tmp = await SaveFrame(frame);
-                    logger.LogError("ax2txt returned exit code {exitCode}, data saved {path}", execution.ExitCode, tmp);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError("ax2txt returned exit code {exitCode}, got exception while saving data: {error}", execution.ExitCode, ex.Message);
-                }
-
-                return null;
-            }
-
-            var result = buffer.ToString();
-
-            if (!string.IsNullOrWhiteSpace(result))
-            {
-                return result.Trim().Replace("\r", "").Replace("\n", " ");
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogError("While running ax2txt: {error}", ex.Message);
-            return null;
-        }
-
-        logger.LogError("Fell out the bottom");
-        return null;
-    }
-
-    private static async Task<string> SaveFrame(byte[] frame)
-    {
-        var dir = "/tmp/kissproxy";
-        if (!Directory.Exists(dir))
-        {
-            Directory.CreateDirectory(dir);
-        }
-
-        var tmp = Path.Combine($"/tmp/kissproxy/{Guid.NewGuid()}");
-        await File.WriteAllBytesAsync(tmp, frame);
-        return tmp;
     }
 
     private static (string server, int port) SplitMqttServer(string mqttServer)
