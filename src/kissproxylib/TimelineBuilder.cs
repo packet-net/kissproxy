@@ -1,6 +1,7 @@
 namespace kissproxylib;
 
-public sealed record TimelineSegment(DateTime Start, DateTime End, string State, string? Detail, bool Silent);
+/// <param name="Initiator">Who opened the session (sent the first XID or SABM), when known</param>
+public sealed record TimelineSegment(DateTime Start, DateTime End, string State, string? Detail, bool Silent, string? Initiator);
 
 /// <summary>One or more events of a kind merged into a bin; Details holds the first few.</summary>
 public sealed record TimelineMarker(DateTime Time, string Kind, int Count, IReadOnlyList<string> Details);
@@ -92,12 +93,17 @@ public static class TimelineBuilder
         var segments = new List<TimelineSegment>();
         string state = start?.State ?? LinkStates.Disconnected;
         string? detail = start?.Detail;
+        string? initiator = state == LinkStates.Connecting ? Opener(detail) : null;
         var cursor = from;
 
         foreach (var e in events.Where(e => e.Kind == "state"))
         {
             if (state != LinkStates.Disconnected && e.Timestamp > cursor)
-                segments.Add(new TimelineSegment(cursor, e.Timestamp, state, detail, false));
+                segments.Add(new TimelineSegment(cursor, e.Timestamp, state, detail, false, initiator));
+            if (e.State == LinkStates.Connecting && state == LinkStates.Disconnected)
+                initiator = Opener(e.Detail);
+            else if (e.State == LinkStates.Disconnected)
+                initiator = null;
             state = e.State!;
             detail = e.Detail;
             cursor = e.Timestamp;
@@ -121,7 +127,14 @@ public static class TimelineBuilder
         }
 
         if (end > cursor)
-            segments.Add(new TimelineSegment(cursor, end, state, detail, silent));
+            segments.Add(new TimelineSegment(cursor, end, state, detail, silent, initiator));
         return segments;
+    }
+
+    // The tracker's connecting events read "XID from GB7RDG" or "SABM from GB7BSK-1"
+    private static string? Opener(string? detail)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(detail ?? "", @"^(?:XID|SABME?) from (\S+)$");
+        return m.Success ? m.Groups[1].Value : null;
     }
 }

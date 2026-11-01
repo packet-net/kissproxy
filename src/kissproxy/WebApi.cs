@@ -345,7 +345,7 @@ public static class WebApi
                     modem = r.Modem,
                     local = r.Local,
                     remote = r.Remote,
-                    segments = r.Segments.Select(g => new { s = FrameStore.ToMs(g.Start), e = FrameStore.ToMs(g.End), state = g.State, detail = g.Detail, silent = g.Silent }),
+                    segments = r.Segments.Select(g => new { s = FrameStore.ToMs(g.Start), e = FrameStore.ToMs(g.End), state = g.State, detail = g.Detail, silent = g.Silent, initiator = g.Initiator }),
                     markers = r.Markers.Select(m => new { t = FrameStore.ToMs(m.Time), kind = m.Kind, count = m.Count, details = m.Details }),
                     activity = r.Activity.Select(a => new { t = FrameStore.ToMs(a.Start), rx = a.Received, tx = a.Transmitted }),
                 }),

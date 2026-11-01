@@ -390,4 +390,23 @@ public class LinkTrackerTests : IDisposable
         using var reopened = new FrameStore(dbPath, NullLogger.Instance, flushInterval: TimeSpan.Zero);
         reopened.LoadLocalCalls().Should().BeEquivalentTo(["M0LTE"]);
     }
+
+    [Fact]
+    public void Timeline_KnowsWhoOpenedEachSession()
+    {
+        Rx(0, Frame("GB7BSK-1", "GB7RDG-2", true, SABM));
+        Tx(1, Frame("GB7RDG-2", "GB7BSK-1", false, UA));
+        Rx(5, Frame("GB7BSK-1", "GB7RDG-2", true, DISC));
+        Tx(6, Frame("GB7RDG-2", "GB7BSK-1", false, UA));
+        Tx(60, Frame("GB7RDG-2", "GB7BSK-1", true, XID));
+        Rx(61, Frame("GB7BSK-1", "GB7RDG-2", false, XID));
+        Tx(62, Frame("GB7RDG-2", "GB7BSK-1", true, SABM));
+        Rx(63, Frame("GB7BSK-1", "GB7RDG-2", false, UA));
+
+        var now = T0.AddMinutes(5);
+        var row = TimelineBuilder.Build(monitor, T0.AddMinutes(-1), now, now).Rows.Single(r => r.Remote == "GB7BSK-1");
+        row.Segments.Select(s => (s.State, s.Initiator)).Should().Equal(
+            (LinkStates.Connecting, "GB7BSK-1"), (LinkStates.Connected, "GB7BSK-1"), (LinkStates.Disconnecting, "GB7BSK-1"),
+            (LinkStates.Connecting, "GB7RDG-2"), (LinkStates.Connected, "GB7RDG-2"));
+    }
 }
