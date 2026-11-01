@@ -269,7 +269,8 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             var now = clock();
             if (now - stats.Since >= TimeSpan.FromMinutes(1))
             {
-                log?.Invoke(stats.Summary(now, NoiseFloorDbm));
+                try { log?.Invoke(stats.Summary(now, NoiseFloorDbm)); }
+                catch { } // logging must never stop the sampling
                 stats = new ReadStats(now);
             }
         }
@@ -316,9 +317,11 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
         if (radio.Capabilities.HasFlag(RadioCapabilities.CarrierSense))
             radio.CarrierSenseChanged -= OnCarrierSenseChanged;
         cts.Cancel();
-        if (sampler != null)
-            await Task.Run(() => sampler.Join(TimeSpan.FromSeconds(5)));
-        cts.Dispose();
+        bool stopped = sampler == null || await Task.Run(() => sampler.Join(TimeSpan.FromSeconds(5)));
+        // A thread still stuck in a read keeps using the token; disposing it under the thread
+        // would throw there and end the process, so leave it to the GC in that case
+        if (stopped)
+            cts.Dispose();
     }
 
     private sealed class CarrierWindow(DateTime riseAt)
