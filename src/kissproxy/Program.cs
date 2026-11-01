@@ -24,7 +24,7 @@ try
         var defaultConfig = new GlobalConfig
         {
             WebPort = 8080,
-            Password = "changeme",
+            Password = "",  // set by the first login to the web UI
             Modems = []
         };
         var defaultJson = System.Text.Json.JsonSerializer.Serialize(defaultConfig, new System.Text.Json.JsonSerializerOptions
@@ -70,11 +70,10 @@ if (configManager.NeedsMigration)
 // Create state manager
 var stateManager = new ModemStateManager();
 
-// Create proxy instances dictionary
-var proxyInstances = new Dictionary<string, KissProxy>();
-
 // Cancellation token for graceful shutdown
 var cts = new CancellationTokenSource();
+
+var modemRunner = new ModemRunner(configManager, stateManager, LogInfo, cts.Token);
 
 // Start web server
 var builder = WebApplication.CreateBuilder();
@@ -130,73 +129,16 @@ else
 }
 
 // Map API endpoints
-WebApi.MapEndpoints(app, configManager, stateManager, proxyInstances);
+WebApi.MapEndpoints(app, configManager, stateManager, modemRunner.Proxies);
 
 // Start modem proxy tasks
-var proxyTasks = new List<Task>();
-foreach (var modemConfig in config.Modems)
+foreach (var modemConfig in configManager.Modems)
 {
-    var state = stateManager.GetOrCreate(modemConfig.Id);
-    var logger = new ConsoleLogger(modemConfig.Id);
-    var proxy = new KissProxy(modemConfig.Id, logger);
-
-    proxyInstances[modemConfig.Id] = proxy;
-
-    var task = Task.Run(async () =>
-    {
-        try
-        {
-            await proxy.Run(modemConfig, config, state, cts.Token);
-        }
-        catch (Exception ex)
-        {
-            LogError($"Modem {modemConfig.Id} proxy error: {ex.Message}");
-        }
-    });
-    proxyTasks.Add(task);
-
-    LogInfo($"Started proxy for modem '{modemConfig.Id}' on port {modemConfig.TcpPort}");
+    modemRunner.Start(modemConfig);
 }
 
-// Subscribe to config changes: update existing proxies, or start a new one for newly-added modems
-configManager.ModemConfigChanged += modemId =>
-{
-    var newConfig = configManager.GetModem(modemId);
-    if (newConfig == null)
-        return; // Modem was deleted — no action needed (existing proxy will keep running until restart)
-
-    if (proxyInstances.TryGetValue(modemId, out var proxy))
-    {
-        // Existing proxy — update in-memory config only; do not send params to modem.
-        // Params are sent only on explicit Apply Now (POST .../apply).
-        proxy.UpdateConfig(newConfig);
-    }
-    else
-    {
-        // New modem added via web UI — start a proxy task for it
-        var state = stateManager.GetOrCreate(modemId);
-        var newProxyLogger = new ConsoleLogger(modemId);
-        var newProxy = new KissProxy(modemId, newProxyLogger);
-        proxyInstances[modemId] = newProxy;
-
-        // Capture current global config (MQTT settings etc.) at the moment the proxy starts
-        var globalConfig = configManager.Config;
-        var task = Task.Run(async () =>
-        {
-            try
-            {
-                await newProxy.Run(newConfig, globalConfig, state, cts.Token);
-            }
-            catch (Exception ex)
-            {
-                LogError($"Modem {modemId} proxy error: {ex.Message}");
-            }
-        });
-        proxyTasks.Add(task);
-
-        LogInfo($"Started proxy for new modem '{modemId}' on port {newConfig.TcpPort}");
-    }
-};
+// Modems added, changed or deleted via the web UI
+configManager.ModemConfigChanged += modemId => _ = modemRunner.OnModemConfigChangedAsync(modemId);
 
 // Run web server
 var webUrl = $"http://0.0.0.0:{config.WebPort}";
@@ -213,7 +155,7 @@ catch (Exception ex)
 }
 
 // Wait for proxy tasks to complete
-await Task.WhenAll(proxyTasks);
+await modemRunner.WhenAllStopped();
 
 return 0;
 
