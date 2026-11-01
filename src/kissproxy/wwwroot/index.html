@@ -569,8 +569,14 @@
         #timeline-svg .row-label { cursor: pointer; }
         #timeline-svg .row-label:hover text { text-decoration: underline; }
         #timeline-svg .handle { cursor: ew-resize; }
-        #timeline-svg .sel-body { cursor: grab; }
-        #timeline-svg .track { cursor: crosshair; }
+        #timeline-svg .sel-body { pointer-events: none; }
+        #timeline-tip { position: fixed; z-index: 1000; pointer-events: none; display: none; max-width: 420px; background: #0b1020; color: var(--text); border: 1px solid var(--accent); border-radius: 6px; padding: 6px 9px; font-size: 0.8rem; line-height: 1.4; white-space: pre-line; box-shadow: 0 4px 14px rgba(0,0,0,0.5); }
+        #timeline-tip b { color: #fff; }
+        .link-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+        .link-chip { display: inline-flex; align-items: center; gap: 7px; background: var(--card-bg); border: 1px solid var(--accent); border-radius: 14px; padding: 3px 11px 3px 8px; font-size: 0.8rem; cursor: pointer; }
+        .link-chip.active { border-color: var(--highlight); }
+        .link-chip .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+        .link-chip .muted { color: var(--text-muted); }
         .links-empty { color: var(--text-muted); padding: 30px; text-align: center; }
         .frames-header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 16px 0 8px; color: var(--text-muted); font-size: 0.9rem; }
         .frames-header button { background: var(--card-bg); color: var(--text); border: 1px solid var(--accent); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
@@ -708,6 +714,8 @@
                 <span class="links-status" id="links-status"></span>
             </div>
             <div class="links-legend" id="links-legend"></div>
+            <div class="link-chips" id="link-chips"></div>
+            <div id="timeline-tip"></div>
             <div id="timeline-wrap"><div class="links-empty">Loading...</div></div>
             <div class="frames-header" id="frames-header"></div>
             <div class="frames-table-wrap"><table class="frames-table" id="frames-table"></table></div>
@@ -1819,6 +1827,35 @@
         const PAGE = 500;
         const tl = { data: null, day: 0, zoom: null, sel: null, follow: true, filter: null, page: 0, openHeard: new Set(), timer: null, drag: null };
 
+        // Hover text for anything on the timeline: data-tip on the element (first line in bold)
+        function tip(text) {
+            return ` data-tip="${esc(text)}"`;
+        }
+
+        function fmtDuration(ms) {
+            const s = Math.max(0, Math.round(ms / 1000));
+            if (s < 60) return `${s} s`;
+            const m = Math.floor(s / 60);
+            if (m < 60) return `${m} min`;
+            const h = Math.floor(m / 60);
+            if (h < 48) return `${h} h ${m % 60} min`;
+            return `${Math.floor(h / 24)} d ${h % 24} h`;
+        }
+
+        // A link's state now, for its chip and row hover text
+        function liveSummary(r, now) {
+            const lv = r.live;
+            if (!lv) return null;
+            const state = lv.quiet ? (lv.state === 'connecting' ? 'trying, but quiet' : 'gone quiet') : lv.state;
+            const since = lv.since ? ` for ${fmtDuration(now - lv.since)}` : '';
+            return {
+                state,
+                colour: lv.quiet ? '#9e9e9e' : (LINK_FILL[lv.state] || '#616161'),
+                text: `${state}${since}`,
+                detail: `${state}${lv.since ? ` since ${fmtTime(lv.since, true)} UTC` : ''}${lv.detail ? ` (${lv.detail})` : ''}\nlast frame ${fmtDuration(now - lv.lastFrame)} ago`,
+            };
+        }
+
         // "GB7RDG-2 <> GB7BSK-1": a connection between our call and a partner (not "via",
         // which in packet means a digipeater)
         function linkName(local, remote) {
@@ -1944,7 +1981,41 @@
             return out;
         }
 
+        // A chip for each link seen in the selected window, with its state now; click to filter
+        function renderLinkChips() {
+            const d = tl.data, el = document.getElementById('link-chips');
+            if (!d || !tl.sel) { el.innerHTML = ''; return; }
+            const inSel = r =>
+                r.segments.some(g => g.s < tl.sel.e && g.e > tl.sel.s) ||
+                r.activity.some(a => a.t < tl.sel.e && a.t + d.bucketMs > tl.sel.s) ||
+                r.markers.some(m => m.t >= tl.sel.s && m.t < tl.sel.e);
+            const rows = d.rows.filter(r => r.local && r.live && inSel(r));
+            el.innerHTML = rows.map(r => {
+                const l = liveSummary(r, d.now);
+                const active = tl.filter && tl.filter.modem === r.modem && tl.filter.local === r.local && tl.filter.remote === r.remote;
+                return `<span class="link-chip${active ? ' active' : ''}" data-modem="${esc(r.modem)}" data-local="${esc(r.local)}" data-remote="${esc(r.remote)}"` +
+                    `${tip(`${linkName(r.local, r.remote)} on ${r.modem}\n${l.detail}\nClick to show only its frames`)}>` +
+                    `<i class="dot" style="background:${l.colour}"></i><span class="muted">${esc(r.modem)}</span> ${esc(linkName(r.local, r.remote))} <span class="muted">${esc(l.text)}</span></span>`;
+            }).join('') || '<span class="muted" style="font-size:0.8rem">No connections in the selected window.</span>';
+            el.querySelectorAll('.link-chip').forEach(c => c.addEventListener('click', () => toggleLinkFilter(c.dataset)));
+            // The container outlives each render, so its tooltip handler is attached once
+            if (!el.dataset.tips) {
+                el.dataset.tips = '1';
+                bindTips(el, () => null);
+            }
+        }
+
+        function toggleLinkFilter(ds) {
+            const f = { modem: ds.modem, local: ds.local, remote: ds.remote };
+            const same = tl.filter && tl.filter.modem === f.modem && tl.filter.local === f.local && tl.filter.remote === f.remote;
+            tl.filter = same ? null : f;
+            tl.page = 0;
+            renderTimeline();
+            loadFrames();
+        }
+
         function renderTimeline() {
+            renderLinkChips();
             const d = tl.data;
             const wrap = document.getElementById('timeline-wrap');
             if (!d.rows.length) {
@@ -1963,12 +2034,15 @@
 
             for (const it of items) {
                 if (it.kind === 'group') {
-                    parts.push(`<rect x="0" y="${y}" width="${width}" height="${TL.group}" fill="rgba(15,52,96,0.5)"/>`);
-                    parts.push(`<text x="10" y="${y + 16}" font-weight="bold">${esc(it.modem)}</text><text x="${10 + it.modem.length * 9 + 8}" y="${y + 16}" class="muted">${it.count} link${it.count === 1 ? '' : 's'}</text>`);
+                    const radio = (d.radios || []).find(r => r.modem === it.modem);
+                    parts.push(`<rect x="0" y="${y}" width="${TL.label}" height="${TL.group}" fill="rgba(15,52,96,0.5)"${tip(`${it.modem}: ${it.count} connection${it.count === 1 ? '' : 's'} in this window${radio ? `\nradio ${radio.status || 'not configured now'}` : '\nno radio on this port'}`)}/>` +
+                        `<rect x="${TL.label}" y="${y}" width="${width - TL.label}" height="${TL.group}" fill="rgba(15,52,96,0.5)"/>`);
+                    // The texts let the mouse through to the heading's rect and its tooltip
+                    parts.push(`<text x="10" y="${y + 16}" font-weight="bold" pointer-events="none">${esc(it.modem)}</text><text x="${10 + it.modem.length * 9 + 8}" y="${y + 16}" class="muted" pointer-events="none">${it.count} link${it.count === 1 ? '' : 's'}</text>`);
                     parts.push(renderNoiseTrace(it.modem, y, x, 10 + it.modem.length * 9 + 8 + `${it.count} links`.length * 7 + 10));
                     y += TL.group;
                 } else if (it.kind === 'heard') {
-                    parts.push(`<g class="row-label" data-heard="${esc(it.modem)}"><rect x="0" y="${y}" width="${TL.label}" height="${TL.row}" fill="transparent"/>` +
+                    parts.push(`<g class="row-label" data-heard="${esc(it.modem)}"${tip(`${it.count} station${it.count === 1 ? '' : 's'} heard on ${it.modem} without a connection to us (beacons, NODES, others' links)\nClick to ${it.open ? 'hide' : 'show'} them`)}><rect x="0" y="${y}" width="${TL.label}" height="${TL.row}" fill="transparent"/>` +
                         `<text x="14" y="${y + 18}" class="muted">${it.open ? '&#9662;' : '&#9656;'} Heard only (${it.count})</text></g>`);
                     y += TL.row;
                 } else {
@@ -1994,10 +2068,13 @@
 
             // Selection: shaded body over the rows, handles on the track
             const sx = x(tl.sel.s), ex = x(tl.sel.e);
-            const sel = `<rect class="track" id="tl-track" x="${TL.label}" y="${TL.axis}" width="${plotW}" height="${TL.track - 4}" rx="4" fill="rgba(255,255,255,0.06)"/>` +
+            // The shaded body ignores the mouse so everything under it keeps its hover text; the
+            // window is moved by dragging its strip on the track, resized by the handles
+            const sel = `<rect class="track" id="tl-track" x="${TL.label}" y="${TL.axis}" width="${plotW}" height="${TL.track - 4}" rx="4" fill="rgba(255,255,255,0.06)"${tip('Drag along this track to select a time window\nIts frames are listed below the timeline')}/>` +
                 `<rect class="sel-body" id="tl-sel" x="${sx}" y="${TL.axis}" width="${Math.max(1, ex - sx)}" height="${height - TL.axis}" fill="rgba(233,69,96,0.12)" stroke="rgba(233,69,96,0.6)"/>` +
-                `<rect class="handle" id="tl-h-start" x="${sx - 5}" y="${TL.axis - 2}" width="10" height="${TL.track}" rx="3" fill="#e94560"/>` +
-                `<rect class="handle" id="tl-h-end" x="${ex - 5}" y="${TL.axis - 2}" width="10" height="${TL.track}" rx="3" fill="#e94560"/>`;
+                `<rect id="tl-grip" x="${sx}" y="${TL.axis}" width="${Math.max(1, ex - sx)}" height="${TL.track - 4}" fill="rgba(233,69,96,0.25)" data-tip-sel="1"/>` +
+                `<rect class="handle" id="tl-h-start" x="${sx - 5}" y="${TL.axis - 2}" width="10" height="${TL.track}" rx="3" fill="#e94560" data-tip-sel="start"/>` +
+                `<rect class="handle" id="tl-h-end" x="${ex - 5}" y="${TL.axis - 2}" width="10" height="${TL.track}" rx="3" fill="#e94560" data-tip-sel="end"/>`;
 
             wrap.innerHTML = `<svg id="timeline-svg" viewBox="0 0 ${width} ${height}" height="${height}">${axis.join('')}${parts.join('')}${sel}</svg>`;
             attachTimelineEvents(x, plotW);
@@ -2021,8 +2098,7 @@
                     runs[runs.length - 1].push(`${x(p.t).toFixed(1)},${py(p.floor).toFixed(1)}`);
                 });
                 out += runs.map(r => `<polyline points="${r.join(' ')}" fill="none" stroke="#4fc3f7" stroke-width="1.5"/>`).join('') +
-                    `<rect x="${TL.label}" y="${y}" width="${x(tl.data.to) - TL.label}" height="${TL.group}" fill="transparent">` +
-                    `<title>Noise floor ${lo.toFixed(0)} to ${hi.toFixed(0)} dBm over this window (blue line)\n${esc(status)}</title></rect>`;
+                    `<rect x="${TL.label}" y="${y}" width="${x(tl.data.to) - TL.label}" height="${TL.group}" fill="transparent" data-noise="${esc(modem)}"/>`;
             }
             // Short, to fit beside the port name; the full status is in the hover text
             const up = (radio.status || '').startsWith('connected');
@@ -2030,7 +2106,7 @@
             const live = tl.day === 0 && !tl.zoom;
             const range = pts.length ? `${Math.min(...pts.map(p => p.floor)).toFixed(0)} to ${Math.max(...pts.map(p => p.floor)).toFixed(0)} dBm` : '';
             const label = !live ? (range || 'no radio') : !radio.status ? 'no radio' : !up ? 'radio down' : pts.length ? `noise ${pts[pts.length - 1].floor.toFixed(0)} dBm` : 'radio up';
-            out += `<text x="${labelX}" y="${y + 16}" class="muted" font-size="11">${esc(label)}<title>${esc(status)}</title></text>`;
+            out += `<text x="${labelX}" y="${y + 16}" class="muted" font-size="11"${tip(`Noise floor on ${modem}\n${status}`)}>${esc(label)}</text>`;
             return out;
         }
 
@@ -2039,16 +2115,21 @@
             const isFilter = tl.filter && tl.filter.modem === r.modem && tl.filter.remote === r.remote && tl.filter.local === (r.local ?? '');
             const out = [];
             if (isFilter) out.push(`<rect x="0" y="${y}" width="${width}" height="${TL.row}" fill="rgba(233,69,96,0.10)"/>`);
+            out.push(`<rect x="${TL.label}" y="${y}" width="${width - TL.label}" height="${TL.row}" fill="transparent" data-rowtip="${esc(linkName(r.local, r.remote))} on ${esc(r.modem)}"/>`);
             out.push(`<line x1="${TL.label}" y1="${y + TL.row}" x2="${width}" y2="${y + TL.row}" stroke="rgba(255,255,255,0.04)"/>`);
 
             // Label: our call and the partner for a connection, just the station when only heard
             const name = linkName(r.local, r.remote);
-            out.push(`<g class="row-label" data-modem="${esc(r.modem)}" data-local="${esc(r.local ?? '')}" data-remote="${esc(r.remote)}">` +
+            const ls = liveSummary(r, d.now);
+            const labelTip = r.local
+                ? `${name} on ${r.modem}\nConnection between our ${r.local} and ${r.remote}\nNow: ${ls ? ls.detail : 'unknown'}\nClick to show only its frames`
+                : `${r.remote} on ${r.modem}\nHeard, with no connection to us\nClick to show only its frames`;
+            out.push(`<g class="row-label" data-modem="${esc(r.modem)}" data-local="${esc(r.local ?? '')}" data-remote="${esc(r.remote)}"${tip(labelTip)}>` +
                 `<rect x="0" y="${y}" width="${TL.label}" height="${TL.row}" fill="transparent"/>` +
                 (r.local
                     ? `<text x="14" y="${y + 18}"${isFilter ? ' font-weight="bold"' : ''}><tspan class="muted">${esc(r.local)} &lt;&gt; </tspan>${esc(r.remote)}</text>`
                     : `<text x="24" y="${y + 18}"${isFilter ? ' font-weight="bold"' : ''}>${esc(r.remote)}</text>`) +
-                `<title>Show only frames for ${esc(name)} on ${esc(r.modem)}</title></g>`);
+                `</g>`);
 
             // Frame activity, faint, along the bottom of the row
             const maxCount = d.maxCount;
@@ -2056,7 +2137,7 @@
             for (const a of r.activity) {
                 const n = a.rx + a.tx;
                 const h = 2 + Math.sqrt(n / maxCount) * 5;
-                out.push(`<rect x="${x(a.t)}" y="${y + TL.row - h - 1}" width="${bw}" height="${h}" fill="rgba(255,255,255,0.35)"><title>${fmtTime(a.t, true)}: ${a.rx} received, ${a.tx} sent</title></rect>`);
+                out.push(`<rect x="${x(a.t)}" y="${y + TL.row - h - 1}" width="${bw}" height="${h}" fill="rgba(255,255,255,0.35)"${tip(`${n} frame${n === 1 ? '' : 's'}, ${fmtTime(a.t, true)} to ${fmtTime(a.t + d.bucketMs)} UTC\n${a.rx} received, ${a.tx} sent`)}/>`);
             }
 
             // Link state bars
@@ -2065,8 +2146,10 @@
                 const fill = LINK_FILL[g.state] || '#9e9e9e';
                 const style = g.silent ? `fill="${fill}" fill-opacity="0.25" stroke="${fill}" stroke-dasharray="3 2"` : `fill="${fill}" fill-opacity="0.85"`;
                 const by = g.initiator ? `, connected by ${esc(g.initiator)}` : '';
-                out.push(`<rect x="${x1}" y="${y + 9}" width="${w}" height="10" rx="2" ${style}>` +
-                    `<title>${esc(g.state)} ${fmtTime(g.s, true)} to ${fmtTime(g.e, true)}${g.detail ? ': ' + esc(g.detail) : ''}${by}${g.silent ? ' (then went quiet)' : ''}</title></rect>`);
+                const segTip = `${g.state[0].toUpperCase()}${g.state.slice(1)}${g.silent ? ', then went quiet' : ''}\n` +
+                    `${fmtTime(g.s, true)} to ${fmtTime(g.e, true)} UTC (${fmtDuration(g.e - g.s)})` +
+                    `${g.detail ? `\n${g.detail}` : ''}${g.initiator ? `\nOpened by ${g.initiator}` : ''}`;
+                out.push(`<rect x="${x1}" y="${y + 9}" width="${w}" height="10" rx="2" ${style}${tip(segTip)}/>`);
             }
 
             // Who opened each session: an arrowhead at its start, pointing out (right) when we
@@ -2078,7 +2161,7 @@
                 if (!sessionStart) return;
                 const x1 = x(g.s), out_ = g.initiator === r.local, cy = y + 14;
                 const path = out_ ? `M${x1 - 7},${cy - 5} L${x1 - 1},${cy} L${x1 - 7},${cy + 5} Z` : `M${x1 - 1},${cy - 5} L${x1 - 7},${cy} L${x1 - 1},${cy + 5} Z`;
-                out.push(`<path d="${path}" fill="#eaeaea"><title>${out_ ? 'We connected' : 'They connected'}: ${esc(g.initiator)} opened at ${fmtTime(g.s, true)}</title></path>`);
+                out.push(`<path d="${path}" fill="#eaeaea"${tip(`${out_ ? 'We connected out' : 'They connected in'}\n${g.initiator} opened the session at ${fmtTime(g.s, true)} UTC`)}/>`);
             });
 
             // Trouble markers (the server merges close ones), merged again per few pixels
@@ -2094,8 +2177,7 @@
                 const mark = MARKS[b.kind] || { colour: '#fff', label: b.kind };
                 const n = b.count;
                 const lines = b.details.slice(0, 4).join('\n') + (n > 4 ? `\n... and ${n - 4} more` : '');
-                out.push(`<path d="M${b.x - 4},${y + 1} L${b.x + 4},${y + 1} L${b.x},${y + 8} Z" fill="${mark.colour}">` +
-                    `<title>${esc(mark.label)}${n > 1 ? ' x' + n : ''}\n${esc(lines)}</title></path>`);
+                out.push(`<path d="M${b.x - 4},${y + 1} L${b.x + 4},${y + 1} L${b.x},${y + 8} Z" fill="${mark.colour}"${tip(`${mark.label}${n > 1 ? ' x' + n : ''}\n${lines}`)}/>`);
             }
             return out.join('');
         }
@@ -2117,13 +2199,10 @@
                     renderTimeline();
                     return;
                 }
-                const f = { modem: g.dataset.modem, local: g.dataset.local, remote: g.dataset.remote };
-                const same = tl.filter && tl.filter.modem === f.modem && tl.filter.local === f.local && tl.filter.remote === f.remote;
-                tl.filter = same ? null : f;
-                tl.page = 0;
-                renderTimeline();
-                loadFrames();
+                toggleLinkFilter(g.dataset);
             }));
+
+            attachTimelineTips(svg, toTime);
 
             const start = (mode, e) => {
                 e.preventDefault();
@@ -2132,7 +2211,7 @@
             };
             svg.querySelector('#tl-h-start').addEventListener('pointerdown', e => start('start', e));
             svg.querySelector('#tl-h-end').addEventListener('pointerdown', e => start('end', e));
-            svg.querySelector('#tl-sel').addEventListener('pointerdown', e => start('move', e));
+            svg.querySelector('#tl-grip').addEventListener('pointerdown', e => start('move', e));
             svg.querySelector('#tl-track').addEventListener('pointerdown', e => start('new', e));
 
             svg.addEventListener('pointermove', e => {
@@ -2146,8 +2225,10 @@
                     tl.sel = { s, e: s + len };
                 } else tl.sel = { s: Math.min(g.t0, t), e: Math.max(g.t0, t, Math.min(g.t0, t) + 1000) };
                 const sx = x(tl.sel.s), ex = x(tl.sel.e);
-                svg.querySelector('#tl-sel').setAttribute('x', sx);
-                svg.querySelector('#tl-sel').setAttribute('width', Math.max(1, ex - sx));
+                for (const id of ['#tl-sel', '#tl-grip']) {
+                    svg.querySelector(id).setAttribute('x', sx);
+                    svg.querySelector(id).setAttribute('width', Math.max(1, ex - sx));
+                }
                 svg.querySelector('#tl-h-start').setAttribute('x', sx - 5);
                 svg.querySelector('#tl-h-end').setAttribute('x', ex - 5);
                 showFramesHeader(null);
@@ -2157,11 +2238,56 @@
                 tl.drag = null;
                 tl.follow = tl.day === 0 && !tl.zoom && tl.sel.e >= d.to - 1000;
                 tl.page = 0;
+                renderLinkChips();
                 loadFrames();
             };
             // On window, so letting go outside the timeline still ends the drag
             window.onpointerup = end;
             window.onpointercancel = end;
+        }
+
+        // One floating tooltip for the whole timeline: fixed text from data-tip, or worked out at
+        // the pointer for the noise line, a row's empty space and the selection handles
+        function attachTimelineTips(svg, toTime) {
+            bindTips(svg, toTime);
+        }
+
+        function bindTips(container, toTime) {
+            const svg = container;
+            const box = document.getElementById('timeline-tip');
+            const hide = () => { box.style.display = 'none'; };
+            const textFor = (el, e) => {
+                if (el.dataset.tip) return el.dataset.tip;
+                const t = toTime(e.clientX);
+                if (el.dataset.rowtip) return `${fmtTime(t, true)} UTC\n${el.dataset.rowtip}`;
+                if (el.dataset.tipSel) {
+                    const len = fmtDuration(tl.sel.e - tl.sel.s);
+                    if (el.dataset.tipSel === 'start') return `Start of the frame window\n${fmtTime(tl.sel.s, true)} UTC\nDrag to move it`;
+                    if (el.dataset.tipSel === 'end') return `End of the frame window\n${fmtTime(tl.sel.e, true)} UTC\nDrag to move it`;
+                    return `Frame window, ${len}\n${fmtTime(tl.sel.s, true)} to ${fmtTime(tl.sel.e, true)} UTC\nDrag to move it`;
+                }
+                if (el.dataset.noise) {
+                    const radio = (tl.data.radios || []).find(r => r.modem === el.dataset.noise);
+                    if (!radio || !radio.noise.length) return null;
+                    const p = radio.noise.reduce((a, b) => Math.abs(b.t - t) < Math.abs(a.t - t) ? b : a);
+                    return `Noise floor on ${el.dataset.noise}\n${fmtTime(p.t, true)} UTC: ${p.floor.toFixed(1)} dBm` +
+                        `${p.median != null ? ` (quiet-channel median ${p.median.toFixed(1)})` : ''}`;
+                }
+                return null;
+            };
+            svg.addEventListener('pointermove', e => {
+                if (tl.drag) { hide(); return; }
+                const el = e.target.closest('[data-tip],[data-rowtip],[data-tip-sel],[data-noise]');
+                const text = el && textFor(el, e);
+                if (!text) { hide(); return; }
+                const [first, ...rest] = text.split('\n');
+                box.innerHTML = `<b>${esc(first)}</b>${rest.length ? '\n' + esc(rest.join('\n')) : ''}`;
+                box.style.display = 'block';
+                const w = box.offsetWidth, h = box.offsetHeight;
+                box.style.left = `${Math.min(e.clientX + 14, window.innerWidth - w - 8)}px`;
+                box.style.top = `${e.clientY + 18 + h > window.innerHeight ? e.clientY - h - 10 : e.clientY + 18}px`;
+            });
+            svg.addEventListener('pointerleave', hide);
         }
 
         function showFramesHeader(total) {
