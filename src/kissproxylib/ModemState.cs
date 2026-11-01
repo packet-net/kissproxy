@@ -45,25 +45,8 @@ public class NinoTncStatus
 
         // Skip the AX.25 header (typically 16 bytes: 7 dest + 7 src + 2 control/PID)
         // Look for the "=FirmwareVr:" marker
-        int markerStart = -1;
-        byte[] marker = Encoding.ASCII.GetBytes("=FirmwareVr:");
-        for (int i = payloadStart; i < frame.Length - marker.Length; i++)
-        {
-            bool found = true;
-            for (int j = 0; j < marker.Length; j++)
-            {
-                if (frame[i + j] != marker[j])
-                {
-                    found = false;
-                    break;
-                }
-            }
-            if (found)
-            {
-                markerStart = i;
-                break;
-            }
-        }
+        int markerIndex = frame.AsSpan(payloadStart).IndexOf("=FirmwareVr:"u8);
+        int markerStart = markerIndex < 0 ? -1 : payloadStart + markerIndex;
 
         if (markerStart < 0)
             return null;
@@ -328,7 +311,7 @@ public class ModemState
     /// Records a frame sent to the modem.
     /// </summary>
     public void RecordFrameToModem(byte[] frame, FrameInfo? info = null)
-        => RecordFrameToModem(frame, summary: null, info);
+        => RecordFrameToModem(frame, ToSummary(info), info);
 
     internal void RecordFrameToModem(byte[] frame, FrameSummary? summary, FrameInfo? info)
     {
@@ -366,7 +349,10 @@ public class ModemState
     /// Records a frame received from the modem.
     /// </summary>
     public void RecordFrameFromModem(byte[] frame, FrameInfo? info = null)
-        => RecordFrameFromModem(frame, summary: null, info);
+        => RecordFrameFromModem(frame, ToSummary(info), info);
+
+    private static FrameSummary? ToSummary(FrameInfo? info) =>
+        info is null ? null : new FrameSummary(info.CommandCode, info.ParameterValue);
 
     internal void RecordFrameFromModem(byte[] frame, FrameSummary? summary, FrameInfo? info)
     {
@@ -383,13 +369,12 @@ public class ModemState
                     DataFramesFromModem++;
                     LastDataFrameFromModem = DateTime.UtcNow;
 
-                    if (CaptureDetailedFrameInfo)
+                    // Always parsed (a quick marker search), so a TX Test pressed while no
+                    // browser is watching still shows up when one opens the page
+                    var tncStatus = NinoTncStatus.TryParse(frame);
+                    if (tncStatus != null)
                     {
-                        var tncStatus = NinoTncStatus.TryParse(frame);
-                        if (tncStatus != null)
-                        {
-                            NinoTncStatus = tncStatus;
-                        }
+                        NinoTncStatus = tncStatus;
                     }
                 }
 

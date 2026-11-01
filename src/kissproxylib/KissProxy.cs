@@ -235,8 +235,17 @@ public class KissProxy
                 }
 
                 ISerialPort? serialPort = null;
+                TcpListener? tcpListener = null;
+                string opening = $"TCP port {listenForNodeOnTcpPort}";
                 try
                 {
+                    // Listen before opening the modem: if the TCP port can't be bound, retrying
+                    // must not reopen the modem and resend its parameters (SETHW is a flash
+                    // write with PersistNinoMode) every time round
+                    tcpListener = new TcpListener(allowTcpConnectFromOtherHosts ? IPAddress.Any : IPAddress.Loopback, listenForNodeOnTcpPort);
+                    tcpListener.Start();
+
+                    opening = comPortToTry;
                     serialPort = serialPortFactory.Create(comPortToTry, baudToTry);
                     serialPort.Open();
                     serialPort.ReadTimeout = 1000; // 1 second timeout for graceful shutdown
@@ -263,23 +272,37 @@ public class KissProxy
                     inboundBufferData.Clear();
                     outboundBufferData.Clear();
 
-                    // Start serial reader task (reads from modem, forwards to TCP if connected)
-                    var serialCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                    var serialReaderTask = Task.Run(() => RunSerialReader(serialPort, emitAsBase64String, serialCts.Token));
+                    // The serial session: ends on shutdown, or when the modem stops answering
+                    // (read or write failure), so the port gets reopened
+                    using var serialCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    var serialReaderTask = Task.Run(() =>
+                    {
+                        try { RunSerialReader(serialPort, emitAsBase64String, serialCts.Token); }
+                        finally { try { serialCts.Cancel(); } catch (ObjectDisposedException) { } }
+                    });
 
                     // Run TCP listener loop (accepts connections, bridges to serial)
-                    await RunTcpListenerLoop(serialPort, listenForNodeOnTcpPort, allowTcpConnectFromOtherHosts, emitAsBase64String, cancellationToken);
+                    await RunTcpListenerLoop(tcpListener, serialPort, listenForNodeOnTcpPort, emitAsBase64String, serialCts);
 
-                    // Cancel serial reader when TCP loop exits
                     serialCts.Cancel();
                     try { await serialReaderTask; } catch { }
+
+                    if (!cancellationToken.IsCancellationRequested)
+                    {
+                        logger.LogWarning("Lost {comPort}, reopening", comPortToTry);
+                        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    break;
                 }
                 catch (Exception ex)
                 {
                     if (serialRetryCount == 0)
-                        logger.LogError("Could not open {comPort}: {reason}", comPortToTry, ex.Message);
+                        logger.LogError("Could not open {port}: {reason}", opening, ex.Message);
                     else
-                        logger.LogWarning("Still unable to open {comPort}: {reason}", comPortToTry, ex.Message);
+                        logger.LogWarning("Still unable to open {port}: {reason}", opening, ex.Message);
 
                     if (modemState != null)
                         modemState.SetConnectionState(serialOpen: false);
@@ -287,12 +310,16 @@ public class KissProxy
                     // Exponential backoff: 5s, 10s, 20s, 40s, then 60s cap
                     var delaySeconds = Math.Min(5 * (1 << Math.Min(serialRetryCount, 4)), 60);
                     serialRetryCount++;
-                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), cancellationToken);
+                    try { await Task.Delay(TimeSpan.FromSeconds(delaySeconds), cancellationToken); }
+                    catch (OperationCanceledException) { break; }
                     continue;
                 }
                 finally
                 {
                     StopParameterResendTimer();
+
+                    try { tcpListener?.Stop(); }
+                    catch { }
 
                     lock (serialPortLock)
                     {
@@ -347,22 +374,13 @@ public class KissProxy
     /// Serial port stays open between TCP connections.
     /// </summary>
     private async Task RunTcpListenerLoop(
+        TcpListener tcpListener,
         ISerialPort serialPort,
         int tcpPort,
-        bool allowExternalConnections,
         bool emitAsBase64String,
-        CancellationToken cancellationToken)
+        CancellationTokenSource serialCts)
     {
-        using TcpListener tcpListener = new(allowExternalConnections ? IPAddress.Any : IPAddress.Loopback, tcpPort);
-        try
-        {
-            tcpListener.Start();
-        }
-        catch (Exception ex)
-        {
-            logger.LogError("Failed to start TCP listener: {reason}", ex.Message);
-            return;
-        }
+        var cancellationToken = serialCts.Token;
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -392,7 +410,7 @@ public class KissProxy
             var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
             // Run node-to-modem (reads from TCP, writes to serial)
-            Task nodeToModem = Task.Run(() => RunNodeToModem(tcpStream, serialPort, emitAsBase64String, cts));
+            Task nodeToModem = Task.Run(() => RunNodeToModem(tcpStream, serialPort, emitAsBase64String, cts, serialCts));
 
             // Wait for node to disconnect or cancellation
             while (!cancellationToken.IsCancellationRequested && !nodeToModem.IsCompleted)
@@ -553,7 +571,7 @@ public class KissProxy
         }
     }
 
-    private void RunNodeToModem(NetworkStream tcpStream, ISerialPort serialPort, bool emitAsBase64String, CancellationTokenSource cts)
+    private void RunNodeToModem(NetworkStream tcpStream, ISerialPort serialPort, bool emitAsBase64String, CancellationTokenSource cts, CancellationTokenSource serialCts)
     {
         List<byte> frameBuffer = [];
         var readBuffer = new byte[512];
@@ -576,9 +594,10 @@ public class KissProxy
                 return;
             }
 
-            if (read < 0)
+            // 0 is a clean close by the node
+            if (read <= 0)
             {
-                logger.LogInformation("Node disconnected (read returned {read})", read);
+                logger.LogInformation("Node disconnected");
                 return;
             }
 
@@ -611,6 +630,7 @@ public class KissProxy
                     catch (Exception ex)
                     {
                         logger.LogError("Writing frame to modem failed: \"{error}\"", ex.Message);
+                        serialCts.Cancel();
                         return;
                     }
                 }

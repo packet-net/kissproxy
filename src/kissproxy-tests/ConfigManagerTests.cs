@@ -283,7 +283,7 @@ public class ConfigManagerTests : IDisposable
     }
 
     [Fact]
-    public void ValidatePassword_EmptyConfigPassword_AcceptsAnyNonEmpty()
+    public void ValidatePassword_EmptyConfigPassword_RejectsUntilFirstLoginSetsIt()
     {
         var configJson = """
         {
@@ -296,8 +296,36 @@ public class ConfigManagerTests : IDisposable
         var manager = new ConfigManager(path);
         manager.Load();
 
-        manager.ValidatePassword("anything").Should().BeTrue();
-        manager.ValidatePassword("").Should().BeFalse();
+        manager.ValidatePassword("anything").Should().BeFalse();
+        manager.TrySetInitialPassword("").Should().BeFalse();
+        manager.TrySetInitialPassword("first").Should().BeTrue();
+        manager.TrySetInitialPassword("second").Should().BeFalse();
+        manager.ValidatePassword("first").Should().BeTrue();
+        manager.ValidatePassword("second").Should().BeFalse();
+
+        // Saved, so it survives a restart
+        var reloaded = new ConfigManager(path);
+        reloaded.Load().Password.Should().Be("first");
+    }
+
+    [Fact]
+    public void Load_OldArrayFormat_MovesMqttSettingsToGlobal()
+    {
+        var configJson = """
+        [
+            { "id": "2m", "comPort": "/dev/ttyACM0" },
+            { "id": "70cm", "comPort": "/dev/ttyACM1", "mqttServer": "mqtt.lan:1883", "mqttUsername": "u", "mqttPassword": "p" }
+        ]
+        """;
+
+        var path = CreateTempConfig(configJson);
+        var manager = new ConfigManager(path);
+        var config = manager.Load();
+
+        config.MqttServer.Should().Be("mqtt.lan:1883");
+        config.MqttUsername.Should().Be("u");
+        config.MqttPassword.Should().Be("p");
+        config.Modems.Should().HaveCount(2);
     }
 
     [Fact]

@@ -64,7 +64,7 @@ else
 // Check if password needs to be set
 if (configManager.NeedsMigration)
 {
-    LogWarn("Config needs migration - password must be set via web UI before saving");
+    LogWarn("No web UI password set: the first login to the web UI sets it");
 }
 
 // Create state manager

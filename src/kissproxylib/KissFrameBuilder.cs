@@ -179,7 +179,12 @@ public static class KissFrameBuilder
     public static byte[] BuildParameterFrame(byte command, byte value, int port = 0)
     {
         var cmdByte = BuildCommandByte(command, port);
-        return [FEND, cmdByte, value, FEND];
+        return value switch
+        {
+            FEND => [FEND, cmdByte, FESC, TFEND, FEND],
+            FESC => [FEND, cmdByte, FESC, TFESC, FEND],
+            _ => [FEND, cmdByte, value, FEND],
+        };
     }
 
     /// <summary>
@@ -308,19 +313,21 @@ public static class KissFrameBuilder
     {
         var frames = new List<byte[]>();
 
-        if (config.TxDelayValue.HasValue)
+        // A value is only ours to send while its toggle (the filter) is on; turning the
+        // toggle off in the UI hands the parameter back to the node.
+        if (config.FilterTxDelay && config.TxDelayValue.HasValue)
             frames.Add(BuildParameterFrame(CMD_TXDELAY, (byte)Math.Clamp(config.TxDelayValue.Value / 10, 0, 255), port));
 
-        if (config.PersistenceValue.HasValue)
-            frames.Add(BuildParameterFrame(CMD_PERSISTENCE, (byte)config.PersistenceValue.Value, port));
+        if (config.FilterPersistence && config.PersistenceValue.HasValue)
+            frames.Add(BuildParameterFrame(CMD_PERSISTENCE, (byte)Math.Clamp(config.PersistenceValue.Value, 0, 255), port));
 
-        if (config.SlotTimeValue.HasValue)
+        if (config.FilterSlotTime && config.SlotTimeValue.HasValue)
             frames.Add(BuildParameterFrame(CMD_SLOTTIME, (byte)Math.Clamp(config.SlotTimeValue.Value / 10, 0, 255), port));
 
-        if (config.TxTailValue.HasValue)
+        if (config.FilterTxTail && config.TxTailValue.HasValue)
             frames.Add(BuildParameterFrame(CMD_TXTAIL, (byte)Math.Clamp(config.TxTailValue.Value / 10, 0, 255), port));
 
-        if (config.FullDuplexValue.HasValue)
+        if (config.FilterFullDuplex && config.FullDuplexValue.HasValue)
             frames.Add(BuildParameterFrame(CMD_FULLDUPLEX, (byte)(config.FullDuplexValue.Value ? 1 : 0), port));
 
         if (config.NinoMode.HasValue && includeSetHardware)

@@ -136,6 +136,11 @@ public class KissFrameBuilderTests
         {
             Id = "test",
             ComPort = "/dev/ttyACM0",
+            FilterTxDelay = true,
+            FilterPersistence = true,
+            FilterSlotTime = true,
+            FilterTxTail = true,
+            FilterFullDuplex = true,
             TxDelayValue = 500,
             PersistenceValue = 63,
             SlotTimeValue = 100,
@@ -147,6 +152,23 @@ public class KissFrameBuilderTests
 
         var frames = KissFrameBuilder.BuildAllParameterFrames(config);
         frames.Should().HaveCount(6);
+    }
+
+    [Fact]
+    public void BuildAllParameterFrames_ValueWithToggleOff_IsNotSent()
+    {
+        // Turning a toggle off in the UI leaves the value in the config; it must stop being forced
+        var config = new Config { Id = "t", ComPort = "x", FilterTxDelay = false, TxDelayValue = 500, PersistenceValue = 63 };
+        KissFrameBuilder.BuildAllParameterFrames(config).Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData((byte)0xC0, new byte[] { 0xC0, 0x02, 0xDB, 0xDC, 0xC0 })]
+    [InlineData((byte)0xDB, new byte[] { 0xC0, 0x02, 0xDB, 0xDD, 0xC0 })]
+    [InlineData((byte)0x3F, new byte[] { 0xC0, 0x02, 0x3F, 0xC0 })]
+    public void BuildParameterFrame_EscapesFendAndFesc(byte value, byte[] expected)
+    {
+        KissFrameBuilder.BuildParameterFrame(KissFrameBuilder.CMD_PERSISTENCE, value).Should().Equal(expected);
     }
 
     [Fact]
@@ -171,7 +193,7 @@ public class KissFrameBuilderTests
     [InlineData(2560, 255)]   // clamped to 255
     public void BuildAllParameterFrames_TxDelay_ConvertsMsTo10msUnits(int configMs, byte expectedWireByte)
     {
-        var config = new Config { Id = "t", ComPort = "x", TxDelayValue = configMs };
+        var config = new Config { Id = "t", ComPort = "x", FilterTxDelay = true, TxDelayValue = configMs };
         var frames = KissFrameBuilder.BuildAllParameterFrames(config);
         frames.Should().HaveCount(1);
         frames[0].Should().Equal(FEND, 0x01, expectedWireByte, FEND);
@@ -187,7 +209,7 @@ public class KissFrameBuilderTests
     [InlineData(2550, 255)]
     public void BuildAllParameterFrames_SlotTime_ConvertsMsTo10msUnits(int configMs, byte expectedWireByte)
     {
-        var config = new Config { Id = "t", ComPort = "x", SlotTimeValue = configMs };
+        var config = new Config { Id = "t", ComPort = "x", FilterSlotTime = true, SlotTimeValue = configMs };
         var frames = KissFrameBuilder.BuildAllParameterFrames(config);
         frames.Should().HaveCount(1);
         frames[0].Should().Equal(FEND, 0x03, expectedWireByte, FEND);
@@ -202,7 +224,7 @@ public class KissFrameBuilderTests
     [InlineData(2550, 255)]
     public void BuildAllParameterFrames_TxTail_ConvertsMsTo10msUnits(int configMs, byte expectedWireByte)
     {
-        var config = new Config { Id = "t", ComPort = "x", TxTailValue = configMs };
+        var config = new Config { Id = "t", ComPort = "x", FilterTxTail = true, TxTailValue = configMs };
         var frames = KissFrameBuilder.BuildAllParameterFrames(config);
         frames.Should().HaveCount(1);
         frames[0].Should().Equal(FEND, 0x04, expectedWireByte, FEND);
@@ -220,7 +242,7 @@ public class KissFrameBuilderTests
     [InlineData(255, 255)]    // p = 256/256 = 1.0 (always transmit)
     public void BuildAllParameterFrames_Persistence_RawByteNoConversion(int configValue, byte expectedWireByte)
     {
-        var config = new Config { Id = "t", ComPort = "x", PersistenceValue = configValue };
+        var config = new Config { Id = "t", ComPort = "x", FilterPersistence = true, PersistenceValue = configValue };
         var frames = KissFrameBuilder.BuildAllParameterFrames(config);
         frames.Should().HaveCount(1);
         frames[0].Should().Equal(FEND, 0x02, expectedWireByte, FEND);
@@ -234,7 +256,7 @@ public class KissFrameBuilderTests
     [InlineData(true, 1)]
     public void BuildAllParameterFrames_FullDuplex_BooleanToWireByte(bool configValue, byte expectedWireByte)
     {
-        var config = new Config { Id = "t", ComPort = "x", FullDuplexValue = configValue };
+        var config = new Config { Id = "t", ComPort = "x", FilterFullDuplex = true, FullDuplexValue = configValue };
         var frames = KissFrameBuilder.BuildAllParameterFrames(config);
         frames.Should().HaveCount(1);
         frames[0].Should().Equal(FEND, 0x05, expectedWireByte, FEND);

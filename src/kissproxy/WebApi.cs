@@ -358,7 +358,7 @@ public static class WebApi
         }
 
         var password = authHeader.Substring("Bearer ".Length);
-        if (configManager.ValidatePassword(password))
+        if (configManager.ValidatePassword(password) || configManager.TrySetInitialPassword(password))
         {
             return Results.Ok(new { success = true });
         }

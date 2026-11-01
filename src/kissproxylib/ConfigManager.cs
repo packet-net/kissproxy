@@ -64,10 +64,21 @@ public class ConfigManager
         {
             // Old format: array of modem configs
             var modems = JsonSerializer.Deserialize<List<Config>>(json, JsonOptions) ?? [];
+
+            // MQTT settings were per-modem in the old format; the first modem that has them wins
+            string? OldSetting(string name) => node.AsArray()
+                .OfType<JsonObject>()
+                .Select(m => m.FirstOrDefault(p => string.Equals(p.Key, name, StringComparison.OrdinalIgnoreCase)).Value)
+                .Select(v => v is JsonValue jv && jv.TryGetValue<string>(out var str) && !string.IsNullOrWhiteSpace(str) ? str : null)
+                .FirstOrDefault(v => v != null);
+
             config = new GlobalConfig
             {
-                Password = "",  // Will need to be set on first save
+                Password = "",  // Set by the first login
                 WebPort = 8080,
+                MqttServer = OldSetting("mqttServer"),
+                MqttUsername = OldSetting("mqttUsername"),
+                MqttPassword = OldSetting("mqttPassword"),
                 Modems = modems
             };
         }
@@ -244,13 +255,38 @@ public class ConfigManager
     /// </summary>
     public bool ValidatePassword(string password)
     {
-        // If no password is set, allow any non-empty password
-        // (this handles migration from old format)
+        // No password set yet: nothing validates until the first login sets one (TrySetInitialPassword)
         if (string.IsNullOrEmpty(config.Password))
-            return !string.IsNullOrEmpty(password);
+            return false;
 
         return config.Password == password;
     }
+
+    /// <summary>
+    /// When no password is set (fresh install or migrated old config), makes the given
+    /// password the web UI password and saves it if the config file is writeable.
+    /// Returns false if a password is already set or the given one is empty.
+    /// </summary>
+    public bool TrySetInitialPassword(string password)
+    {
+        lock (initialPasswordLock)
+        {
+            if (!string.IsNullOrEmpty(config.Password) || string.IsNullOrEmpty(password))
+                return false;
+
+            config = config with { Password = password };
+        }
+
+        if (isWriteable)
+        {
+            try { Save(); }
+            catch (Exception) { /* stays in memory; the UI's Save button can retry */ }
+        }
+
+        return true;
+    }
+
+    private readonly object initialPasswordLock = new();
 
     /// <summary>
     /// Returns true if the config is using the old array format (no password set).
