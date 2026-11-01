@@ -421,4 +421,36 @@ public class ConfigManagerTests : IDisposable
         snapshot.Should().HaveCount(1);
         manager.Modems.Should().HaveCount(2);
     }
+
+    [Fact]
+    public void Save_ThroughSymlink_UpdatesTheTarget()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var real = CreateTempConfig("""{ "password": "x", "modems": [] }""");
+        var link = Path.Combine(Path.GetDirectoryName(real)!, "link.conf");
+        File.CreateSymbolicLink(link, Path.GetFileName(real));  // relative link
+        var manager = new ConfigManager(link);
+        manager.Load();
+
+        manager.AddModem(new Config { Id = "6m", ComPort = "/dev/ttyACM2" });
+        manager.Save();
+
+        new FileInfo(link).LinkTarget.Should().NotBeNull();
+        new ConfigManager(real).Load().Modems.Should().ContainSingle(m => m.Id == "6m");
+    }
+
+    [Fact]
+    public void Save_FileDeletedWhileRunning_RecreatesIt()
+    {
+        var path = CreateTempConfig("""{ "password": "x", "modems": [] }""");
+        var manager = new ConfigManager(path);
+        manager.Load();
+        File.Delete(path);
+
+        manager.Save();
+
+        new ConfigManager(path).Load().Password.Should().Be("x");
+    }
 }

@@ -175,7 +175,10 @@ public class ConfigManager
     private void WriteAtomically(string json)
     {
         // Replace the file a symlink points at, not the link
-        var target = File.ResolveLinkTarget(configPath, returnFinalTarget: true)?.FullName ?? Path.GetFullPath(configPath);
+        var fullPath = Path.GetFullPath(configPath);
+        var target = File.Exists(fullPath)
+            ? File.ResolveLinkTarget(fullPath, returnFinalTarget: true)?.FullName ?? fullPath
+            : fullPath;
         var dir = Path.GetDirectoryName(target) ?? ".";
         var temp = Path.Combine(dir, $".{Path.GetFileName(target)}.{Guid.NewGuid():N}.tmp");
         try
