@@ -41,6 +41,9 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     // delivery (LinkMonitor waits 250 ms) so those readings exist.
     public static readonly TimeSpan LookAhead = TimeSpan.FromMilliseconds(100);
 
+    // Modes at least this fast get the look-ahead (GB7RDG: 70cm is 9600, 2m 3600)
+    private const int FastModeBitRate = 4800;
+
     // How long past carrier-fall a delivered frame can still belong to that window: the
     // modem's decode and serial delivery (measured 34-115 ms at 1200 baud)
     private static readonly TimeSpan WindowAttributionSlack = TimeSpan.FromMilliseconds(500);
@@ -120,8 +123,12 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
         {
             float? floor = noiseFloorDbm is { } nf ? (float)nf : null;
 
-            var latest = receivedAt + LookAhead;
-            if (radio.Capabilities.HasFlag(RadioCapabilities.CarrierSense) && FindWindow(receivedAt, airtime) is { } window)
+            // The late-radio look-ahead only for fast modes, where a frame can be shorter than the
+            // radio's reporting lag; slow modes and unknown rates keep the original rule
+            bool fast = bitRateHz >= FastModeBitRate && airtime != null;
+            var latest = fast ? receivedAt + LookAhead : receivedAt;
+            var found = fast ? FindWindowFast(receivedAt, airtime!.Value) : FindWindow(receivedAt, airtime);
+            if (radio.Capabilities.HasFlag(RadioCapabilities.CarrierSense) && found is { } window)
             {
                 var to = window.FallAt is { } fall && fall < latest ? fall : latest;
                 var stats = Statistics(samples.Where(s => s.At >= window.RiseAt && s.At <= to).Select(s => s.Dbm));
@@ -223,15 +230,15 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     /// <summary>Our own transmitter keyed or released (from the radio's progress reports).</summary>
     public void SetTransmitting(bool keyed) => transmitting = keyed;
 
-    // The frame belongs to the window whose carrier carried it. A window is plausible if it
-    // rose no later than LookAhead after the frame started on air (its delivery less its
-    // airtime: a radio can report carrier late, but a carrier that rose well after the frame was
-    // already on air is someone else's), and fell no more than the slack before delivery (the
-    // modem delivers after the carrier drops). Of those, the one nearest the delivery wins: a
-    // previous station's carrier ended earlier, a late-reported one of the frame's own is close.
-    private CarrierWindow? FindWindow(DateTime receivedAt, TimeSpan? airtime)
+    // Fast modes: the frame belongs to the window whose carrier carried it. A window is
+    // plausible if it rose no later than LookAhead after the frame started on air (its delivery
+    // less its airtime: a radio can report carrier late, but a carrier that rose well after the
+    // frame was already on air is someone else's), and fell no more than the slack before
+    // delivery. Of those, the one nearest the delivery wins: a previous station's carrier ended
+    // earlier, a late-reported one of the frame's own is close.
+    private CarrierWindow? FindWindowFast(DateTime receivedAt, TimeSpan airtime)
     {
-        var latestRise = receivedAt - (airtime ?? TimeSpan.Zero) + LookAhead;
+        var latestRise = receivedAt - airtime + LookAhead;
 
         CarrierWindow? best = null;
         var bestDistance = TimeSpan.MaxValue;
@@ -253,6 +260,30 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
         return best;
     }
 
+    // Slow modes and unknown rates (packet.net's rule): the frame belongs to the window whose
+    // carrier carried it. Delivery trails carrier-fall by the modem's decode and serial
+    // latency, so closed windows stay eligible for a slack, and the next station may key inside
+    // it: a window that opened after the frame was already on air can't claim it.
+    private CarrierWindow? FindWindow(DateTime receivedAt, TimeSpan? airtime)
+    {
+        CarrierWindow? closed = null;
+        foreach (var w in windows)
+        {
+            if (w.RiseAt <= receivedAt && receivedAt <= w.FallAt!.Value + WindowAttributionSlack)
+                closed = w;
+        }
+
+        if (currentWindow is not { } open || open.RiseAt > receivedAt)
+            return closed;
+        if (closed is null)
+            return open;
+
+        bool fitsSinceTheOpenRise = airtime is { } air && receivedAt - air >= open.RiseAt;
+        return closed.FallAt!.Value > open.RiseAt || fitsSinceTheOpenRise ? open : closed;
+    }
+
+    // One thread per radio doing read, record, read, record: the radio's serial link is the
+    // pace-setter, so a plain blocking loop is all this needs
     private void SampleLoop(CancellationToken cancellationToken)
     {
         var read = new System.Diagnostics.Stopwatch();

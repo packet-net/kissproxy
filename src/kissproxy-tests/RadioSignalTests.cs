@@ -364,6 +364,32 @@ public class RadioSignalTests : IDisposable
         monitor.Attribute(delivered, 15, 9600)!.RssiDbm.Should().Be(-113);
     }
 
+    [Fact]
+    public void SlowMode_NextStationKeyingBeforeDelivery_DoesNotStealTheFrame()
+    {
+        // 1200 baud: a 20-byte frame (153 ms) ends on air 80 ms before delivery; the next
+        // station keys up in that gap and is still up at delivery
+        Idle(T0, TimeSpan.FromSeconds(5), -120);
+        var delivered = T0.AddSeconds(5);
+        Carrier(delivered.AddMilliseconds(-600), TimeSpan.FromMilliseconds(520), -95);
+        radio.Busy = true;
+        monitor.OnCarrierSense(true, delivered.AddMilliseconds(-40));
+        monitor.Record(delivered.AddMilliseconds(-30), -70);
+
+        monitor.Attribute(delivered, 20, 1200)!.RssiDbm.Should().Be(-95);
+    }
+
+    [Fact]
+    public void UnknownBitRate_NoLookAhead()
+    {
+        Idle(T0, TimeSpan.FromSeconds(5), -120);
+        var delivered = T0.AddSeconds(5);
+        Carrier(delivered.AddMilliseconds(-300), TimeSpan.FromMilliseconds(250), -95);
+        Carrier(delivered.AddMilliseconds(50), TimeSpan.FromMilliseconds(100), -70);
+
+        monitor.Attribute(delivered, 20, null)!.RssiDbm.Should().Be(-95);
+    }
+
     private sealed class FakeRadio : IRadioControl
     {
         public RadioCapabilities Capabilities { get; init; } = RadioCapabilities.RssiRead | RadioCapabilities.CarrierSense;
