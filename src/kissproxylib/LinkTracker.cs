@@ -205,8 +205,14 @@ public sealed class LinkTracker
                 // BPQ opens with XID and follows with SABM once it has an answer: one attempt
                 bool sabmAfterXid = frame.Type != "XID" && link.PendingXidFrom == sender;
                 link.PendingXidFrom = frame.Type == "XID" ? sender : null;
+                if (frame.Type == "SABME")
+                    link.Extended = true;
                 if (sabmAfterXid)
+                {
+                    // The XID's answer doesn't answer the SABM
+                    link.AnsweredSinceLastAttempt = false;
                     break;
+                }
 
                 link.Attempts++;
                 if (link.Attempts > 1)
@@ -215,8 +221,6 @@ public sealed class LinkTracker
                         : $"attempt {link.Attempts} by {sender}, no reply");
                 link.AnsweredSinceLastAttempt = false;
                 link.ConnectingSince ??= t;
-                if (frame.Type == "SABME")
-                    link.Extended = true;
                 SetState(LinkStates.Connecting, $"{frame.Type} from {sender}");
                 break;
 

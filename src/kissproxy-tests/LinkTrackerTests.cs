@@ -349,4 +349,45 @@ public class LinkTrackerTests : IDisposable
         var timeline = TimelineBuilder.Build(m, now.AddMinutes(-30), now, now);
         timeline.Rows.Single(r => r.Remote == "GB7WIN").Segments.Should().ContainSingle(s => s.State == LinkStates.Connected);
     }
+
+    [Fact]
+    public void XidThenSabme_IsExtendedMode()
+    {
+        const byte SABME = 0x7F;
+        Tx(0, Frame("GB7RDG", "GB7WIN", true, XID));
+        Rx(1, Frame("GB7WIN", "GB7RDG", false, XID));
+        Tx(2, Frame("GB7RDG", "GB7WIN", true, SABME));
+        Rx(3, Frame("GB7WIN", "GB7RDG", false, UA));
+        for (int i = 0; i < 4; i++)
+            Rx(10 + i * 8, Frame("GB7WIN", "GB7RDG", true, RR(3, true)));
+
+        Events("GB7WIN").Should().NotContain(e => e.Kind == "poll");
+    }
+
+    [Fact]
+    public void SecondSabmAfterXid_UnansweredIsNoReply()
+    {
+        Tx(0, Frame("GB7RDG", "GB7WIN", true, XID));
+        Rx(1, Frame("GB7WIN", "GB7RDG", false, XID));
+        Tx(2, Frame("GB7RDG", "GB7WIN", true, SABM));
+        Tx(5, Frame("GB7RDG", "GB7WIN", true, SABM));
+
+        Events("GB7WIN").Single(e => e.Kind == "attempt").Detail.Should().EndWith("no reply");
+    }
+
+    [Fact]
+    public void CallsLearnedFromDigipeating_ArePurgedOnOpen()
+    {
+        var dbPath = Path.Combine(tempDir, "purge.db");
+        using (var s = new FrameStore(dbPath, NullLogger.Instance, flushInterval: TimeSpan.Zero))
+        {
+            var m = new LinkMonitor(s, "GB7RDG", TimeSpan.Zero);
+            m.Record("2m", true, FrameVia("M0ABC", "M0XYZ", ["GB7RDG*"], true, SABM), T0);
+            m.Record("2m", true, Frame("M0LTE", "GB7WIN", true, SABM), T0.AddSeconds(1));
+            s.AddLocalCall("M0ABC"); // as the deployed build of #11 would have
+        }
+
+        using var reopened = new FrameStore(dbPath, NullLogger.Instance, flushInterval: TimeSpan.Zero);
+        reopened.LoadLocalCalls().Should().BeEquivalentTo(["M0LTE"]);
+    }
 }

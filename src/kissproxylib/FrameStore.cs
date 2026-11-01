@@ -73,6 +73,14 @@ public sealed class FrameStore : IDisposable
                     CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
                     CREATE TABLE IF NOT EXISTS local_calls (call TEXT PRIMARY KEY);
                     """);
+
+                // Before 2026-11-02 calls were also learned from frames we digipeated or UI
+                // frames we sent; forget any that never originated a connected-mode frame
+                Execute("""
+                    DELETE FROM local_calls WHERE call IN (
+                        SELECT src FROM frames WHERE tx = 1 GROUP BY src
+                        HAVING sum(type != 'UI' AND path NOT LIKE '%*%') = 0)
+                    """);
             }
             catch (Exception ex)
             {

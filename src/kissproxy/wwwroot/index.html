@@ -1882,6 +1882,7 @@
                 document.getElementById('links-status').textContent = 'Failed to load: ' + e.message;
                 return;
             }
+            if (tl.drag) return; // a drag started while this was loading; the next refresh catches up
             const d = tl.data;
             const span = Math.min(30 * 60000, d.to - d.from);
             if (!tl.sel) {
