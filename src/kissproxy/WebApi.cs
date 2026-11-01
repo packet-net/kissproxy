@@ -357,6 +357,14 @@ public static class WebApi
                     segments = r.Segments.Select(g => new { s = FrameStore.ToMs(g.Start), e = FrameStore.ToMs(g.End), state = g.State, detail = g.Detail, silent = g.Silent, initiator = g.Initiator }),
                     markers = r.Markers.Select(m => new { t = FrameStore.ToMs(m.Time), kind = m.Kind, count = m.Count, details = m.Details }),
                     activity = r.Activity.Select(a => new { t = FrameStore.ToMs(a.Start), rx = a.Received, tx = a.Transmitted }),
+                    live = r.Live is { } lv ? new
+                    {
+                        state = lv.State,
+                        since = lv.Since is { } s ? FrameStore.ToMs(s) : (long?)null,
+                        detail = lv.Detail,
+                        lastFrame = FrameStore.ToMs(lv.LastFrame),
+                        quiet = lv.Quiet,
+                    } : null,
                 }),
             }, SseJsonOptions);
         });

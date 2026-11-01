@@ -8,6 +8,9 @@ public sealed record TimelineMarker(DateTime Time, string Kind, int Count, IRead
 
 public sealed record TimelineActivity(DateTime Start, int Received, int Transmitted);
 
+/// <summary>A link's state right now: since when, and when it last carried a frame.</summary>
+public sealed record LiveLinkState(string State, DateTime? Since, string? Detail, DateTime LastFrame, bool Quiet);
+
 /// <summary>One row of the timeline: a link (or, with no Local, a station only heard).</summary>
 public sealed record TimelineRow(
     string Modem,
@@ -15,7 +18,8 @@ public sealed record TimelineRow(
     string Remote,
     IReadOnlyList<TimelineSegment> Segments,
     IReadOnlyList<TimelineMarker> Markers,
-    IReadOnlyList<TimelineActivity> Activity);
+    IReadOnlyList<TimelineActivity> Activity,
+    LiveLinkState? Live = null);
 
 public sealed record Timeline(DateTime From, DateTime To, TimeSpan Bucket, IReadOnlyList<TimelineRow> Rows);
 
@@ -37,6 +41,7 @@ public static class TimelineBuilder
         var events = store.QueryEvents(from, to);
         var activity = store.QueryActivity(from, to, bucket);
         var live = monitor.LiveLinks.ToDictionary(l => (l.Modem, (string?)l.Local, l.Remote));
+        var currentStates = store.LastStatesBefore(now.AddTicks(1)).ToDictionary(e => (e.Modem, (string?)e.Local, e.Remote));
 
         var keys = new HashSet<(string Modem, string? Local, string Remote)>();
         foreach (var e in events) keys.Add((e.Modem, e.Local, e.Remote));
@@ -59,9 +64,29 @@ public static class TimelineBuilder
                 : BuildSegments(from, to, now, startStates.GetValueOrDefault(key), linkEvents,
                     live.TryGetValue(key, out var l) ? l.LastFrame : null);
 
+            LiveLinkState? liveState = null;
+            if (key.Local != null)
+            {
+                var since = currentStates.GetValueOrDefault(key);
+                if (live.TryGetValue(key, out var ll))
+                {
+                    var limit = ll.State == LinkStates.Connecting ? LinkTracker.ConnectTimeout : LinkTracker.SilenceLimit;
+                    bool quiet = ll.State != LinkStates.Disconnected && now - ll.LastFrame > limit;
+                    liveState = new LiveLinkState(ll.State, since?.Timestamp, since?.Detail, ll.LastFrame, quiet);
+                }
+                else
+                {
+                    // Down when this process started, so not in the tracker: its last recorded
+                    // state, and its last activity in the window as a stand-in for its last frame
+                    var lastSeen = activityByLink[key].Select(a => a.Start).DefaultIfEmpty(since?.Timestamp ?? from).Max();
+                    liveState = new LiveLinkState(since?.State ?? LinkStates.Disconnected, since?.Timestamp, since?.Detail, lastSeen, false);
+                }
+            }
+
             rows.Add(new TimelineRow(key.Modem, key.Local, key.Remote, segments,
                 MergeMarkers(linkEvents.Where(e => e.Kind != "state"), from, to),
-                activityByLink[key].Select(a => new TimelineActivity(a.Start, a.Received, a.Transmitted)).ToList()));
+                activityByLink[key].Select(a => new TimelineActivity(a.Start, a.Received, a.Transmitted)).ToList(),
+                liveState));
         }
 
         return new Timeline(from, to, bucket, rows
