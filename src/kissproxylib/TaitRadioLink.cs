@@ -78,6 +78,7 @@ public sealed class TaitRadioLink : IAsyncDisposable
                 logger.LogInformation("Tait radio on {port}: {product}", port, identity.ProductName);
                 connectedAt = DateTime.UtcNow;
                 var progressSentAt = connectedAt;
+                int failuresSeen = 0;
 
                 while (!cancellationToken.IsCancellationRequested)
                 {
@@ -93,7 +94,13 @@ public sealed class TaitRadioLink : IAsyncDisposable
                     bool answering = m.ConsecutiveFailures < 3 && session.FaultedSince == null;
                     status = answering ? $"connected: {identity.ProductName}" : "not answering";
 
-                    if (answering && (session.TakeRecovered() || now - progressSentAt > ProgressRefresh))
+                    // Reads that failed and now succeed again may mean the radio rebooted (too
+                    // briefly to fault), which loses the progress setting just the same
+                    bool readsRecovered = answering && m.TotalFailures != failuresSeen;
+                    if (answering)
+                        failuresSeen = m.TotalFailures;
+
+                    if (answering && (session.TakeRecovered() || readsRecovered || now - progressSentAt > ProgressRefresh))
                     {
                         progressSentAt = now;
                         try { await radio.SetProgressMessagesAsync(true, cancellationToken); }

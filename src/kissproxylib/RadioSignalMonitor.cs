@@ -55,10 +55,11 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     private double? noiseFloorDbm;
     private DateTime minuteStart;
     private int consecutiveFailures;
+    private int totalFailures;
     private volatile bool transmitting;
 
     // Released on a carrier rise so the sampler skips the rest of its idle wait: at 9600 baud a
-    // whole frame can be shorter than the 400 ms idle period
+    // whole frame can be shorter than the 400 ms idle period. Never disposed (see DisposeAsync).
     private readonly SemaphoreSlim wake = new(0, 1);
 
     /// <param name="onNoiseSample">Called once a minute with that minute's noise floor</param>
@@ -86,6 +87,9 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
 
     /// <summary>RSSI reads that have failed in a row; the owner reopens the radio past a limit.</summary>
     public int ConsecutiveFailures => Volatile.Read(ref consecutiveFailures);
+
+    /// <summary>RSSI reads that have failed since the monitor started.</summary>
+    public int TotalFailures => Volatile.Read(ref totalFailures);
 
     /// <summary>
     /// Signal readings for a frame delivered at <paramref name="receivedAt"/>, or null when no
@@ -229,6 +233,7 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             catch (Exception)
             {
                 Interlocked.Increment(ref consecutiveFailures);
+                Interlocked.Increment(ref totalFailures);
             }
 
             bool busy = radio.ChannelBusy != false;
@@ -258,7 +263,9 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             try { await samplerLoop; } catch { }
         }
         cts.Dispose();
-        wake.Dispose();
+        // wake is deliberately never disposed: the driver may still be delivering a carrier edge
+        // on its pump thread, and a Release on a disposed semaphore there would end the process.
+        // It holds no OS handle unless AvailableWaitHandle is used, which it isn't.
     }
 
     private sealed class CarrierWindow(DateTime riseAt)
