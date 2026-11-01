@@ -546,6 +546,45 @@
             display: none;
         }
         .sw-control-warning.show { display: block; }
+
+        /* View tabs */
+        .view-tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+        .view-tab { background: var(--card-bg); color: var(--text-muted); border: 1px solid var(--accent); padding: 8px 18px; border-radius: 8px; cursor: pointer; font-size: 0.95rem; }
+        .view-tab.active { background: var(--accent); color: var(--text); }
+
+        /* Link timeline */
+        #links-view { display: none; }
+        .links-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; }
+        .links-toolbar select, .links-toolbar button { background: var(--card-bg); color: var(--text); border: 1px solid var(--accent); border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+        .links-toolbar button:disabled { opacity: 0.4; cursor: default; }
+        .links-status { color: var(--text-muted); font-size: 0.85rem; margin-left: auto; }
+        .links-legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 8px; }
+        .links-legend span { display: inline-flex; align-items: center; gap: 5px; }
+        .legend-swatch { width: 14px; height: 10px; border-radius: 2px; display: inline-block; }
+        .legend-mark { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 8px solid; display: inline-block; }
+        #timeline-wrap { background: var(--card-bg); border-radius: 10px; padding: 8px 0; overflow: hidden; }
+        #timeline-svg { display: block; width: 100%; user-select: none; touch-action: none; }
+        #timeline-svg text { fill: var(--text); font-size: 12px; font-family: inherit; }
+        #timeline-svg .muted { fill: var(--text-muted); }
+        #timeline-svg .row-label { cursor: pointer; }
+        #timeline-svg .row-label:hover text { text-decoration: underline; }
+        #timeline-svg .handle { cursor: ew-resize; }
+        #timeline-svg .sel-body { cursor: grab; }
+        #timeline-svg .track { cursor: crosshair; }
+        .links-empty { color: var(--text-muted); padding: 30px; text-align: center; }
+        .frames-header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 16px 0 8px; color: var(--text-muted); font-size: 0.9rem; }
+        .frames-header button { background: var(--card-bg); color: var(--text); border: 1px solid var(--accent); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+        .filter-chip { background: var(--accent); color: var(--text); border-radius: 12px; padding: 2px 10px; cursor: pointer; }
+        .frames-table-wrap { overflow: auto; max-height: 60vh; background: var(--card-bg); border-radius: 10px; }
+        .frames-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; font-family: ui-monospace, Menlo, Consolas, monospace; }
+        .frames-table th { text-align: left; color: var(--text-muted); font-weight: normal; padding: 6px 8px; border-bottom: 1px solid var(--accent); position: sticky; top: 0; background: var(--card-bg); }
+        .frames-table td { padding: 3px 8px; border-bottom: 1px solid rgba(255,255,255,0.04); white-space: nowrap; vertical-align: top; }
+        .frames-table td.text { white-space: normal; word-break: break-all; min-width: 240px; }
+        .frames-table tr.frame-row { cursor: pointer; }
+        .frames-table tr.frame-row:hover { background: rgba(255,255,255,0.04); }
+        .frames-table tr.tx td.dir { color: var(--highlight); }
+        .frames-table tr.rx td.dir { color: var(--success); }
+        .frames-table tr.raw-row td { color: var(--text-muted); white-space: normal; word-break: break-all; }
     </style>
 </head>
 <body>
@@ -573,6 +612,13 @@
                 <button class="btn-secondary" onclick="showAddModem()">Add Modem</button>
             </div>
         </header>
+
+        <div class="view-tabs">
+            <button class="view-tab active" id="tab-modems" onclick="showView('modems')">Modems</button>
+            <button class="view-tab" id="tab-links" onclick="showView('links')">Links</button>
+        </div>
+
+        <div id="modems-view">
 
         <!-- Callsign warning -->
         <div class="callsign-warning" id="callsign-warning">
@@ -650,6 +696,21 @@
                     </div>
                 </div>
             </div>
+        </div>
+        </div>
+
+        <!-- Link timeline -->
+        <div id="links-view">
+            <div class="links-toolbar">
+                <select id="links-day" onchange="setTimelineDay(parseInt(this.value))"></select>
+                <button id="links-zoom" onclick="zoomToSelection()" disabled>Zoom to selection</button>
+                <button id="links-unzoom" onclick="resetZoom()" disabled>Show whole day</button>
+                <span class="links-status" id="links-status"></span>
+            </div>
+            <div class="links-legend" id="links-legend"></div>
+            <div id="timeline-wrap"><div class="links-empty">Loading...</div></div>
+            <div class="frames-header" id="frames-header"></div>
+            <div class="frames-table-wrap"><table class="frames-table" id="frames-table"></table></div>
         </div>
     </div>
 
@@ -1139,7 +1200,7 @@
                 const select = card?.querySelector('.nino-mode-select');
                 if (select && select.value !== String(status.currentMode)) {
                     select.value = String(status.currentMode);
-                    // Sync in-memory config and API silently — this is telemetry-driven,
+                    // Sync in-memory config and API silently; this is telemetry-driven,
                     // not a user action, so don't mark unsaved changes.
                     const modem = modems.find(m => m.config.id === id);
                     if (modem) {
@@ -1437,7 +1498,7 @@
                                 <div class="kiss-params">
                                     ${renderKissParam(c, 'Control TxTail', 'filterTxTail', 'txTailValue', 'ms', 'ms')}
                                     ${renderKissParam(c, 'Control Slot Time', 'filterSlotTime', 'slotTimeValue', 'ms', 'ms')}
-                                    ${renderKissParam(c, 'Control Persistence', 'filterPersistence', 'persistenceValue', '0–255', '')}
+                                    ${renderKissParam(c, 'Control Persistence', 'filterPersistence', 'persistenceValue', '0-255', '')}
                                     <div class="kiss-param">
                                         <label class="toggle">
                                             <input type="checkbox" ${c.filterSetHardware ? 'checked' : ''} onchange="updateConfig('${c.id}', 'filterSetHardware', this.checked)">
@@ -1476,9 +1537,9 @@
                         <div class="setup-note">
                             <strong>Hardware setup required before using software mode control:</strong>
                             <ul>
-                                <li>Set the <strong>Mode DIP switches to 1111</strong> — this hands mode control over to software (KISS SETHW commands).</li>
-                                <li>Set the <strong>TXDELAY potentiometer to zero</strong> — this hands TX delay control over to software.</li>
-                                <li>Set the <strong>Signals DIP switches</strong> and <strong>Deviation (volume) control</strong> appropriately for your radio — these are not software-controlled.</li>
+                                <li>Set the <strong>Mode DIP switches to 1111</strong>: this hands mode control over to software (KISS SETHW commands).</li>
+                                <li>Set the <strong>TXDELAY potentiometer to zero</strong>: this hands TX delay control over to software.</li>
+                                <li>Set the <strong>Signals DIP switches</strong> and <strong>Deviation (volume) control</strong> appropriately for your radio. These are not software-controlled.</li>
                                 <li>Press the <strong>Test button</strong> on the TNC to send a status frame; the NinoTNC Status panel will update with the currently active mode and other details.</li>
                             </ul>
                         </div>
@@ -1728,6 +1789,357 @@
                 if (e.key === 'Enter') login();
             });
         });
+
+        // ---- Link timeline ----
+        const LINK_FILL = { connected: '#4caf50', connecting: '#ff9800', disconnecting: '#9e9e9e' };
+        const MARKS = {
+            'unexpected-disconnect': { colour: '#f44336', label: 'Unexpected disconnect' },
+            'refused': { colour: '#f44336', label: 'Refused' },
+            'frmr': { colour: '#f44336', label: 'Frame reject' },
+            'rej': { colour: '#ff7043', label: 'Reject' },
+            'retry': { colour: '#ffc107', label: 'Resent frame' },
+            'poll': { colour: '#ffc107', label: 'Poll, no progress' },
+            'attempt': { colour: '#b388ff', label: 'Repeated connect' },
+            'busy': { colour: '#4fc3f7', label: 'Busy' },
+        };
+        const DAY_MS = 86400000;
+        const PAGE = 500;
+        const tl = { data: null, day: 0, zoom: null, sel: null, follow: true, filter: null, page: 0, openHeard: new Set(), timer: null, drag: null };
+
+        function esc(v) {
+            return String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
+        function fmtTime(t, withDate) {
+            const iso = new Date(t).toISOString();
+            return (withDate ? iso.slice(5, 10) + ' ' : '') + iso.slice(11, 19);
+        }
+
+        function showView(name) {
+            document.getElementById('modems-view').style.display = name === 'modems' ? '' : 'none';
+            document.getElementById('links-view').style.display = name === 'links' ? 'block' : 'none';
+            document.getElementById('tab-modems').classList.toggle('active', name === 'modems');
+            document.getElementById('tab-links').classList.toggle('active', name === 'links');
+            clearInterval(tl.timer);
+            tl.timer = null;
+            if (name === 'links') {
+                initLinksView();
+                loadTimeline();
+                tl.timer = setInterval(() => { if (tl.day === 0 && !tl.zoom) loadTimeline(); }, 30000);
+            }
+        }
+
+        function initLinksView() {
+            const day = document.getElementById('links-day');
+            if (!day.options.length) {
+                day.innerHTML = '<option value="0">Last 24 hours</option>' + [1, 2, 3, 4, 5, 6].map(d => {
+                    const start = new Date(Date.now() - d * DAY_MS);
+                    return `<option value="${d}">${start.toISOString().slice(0, 10)} (UTC day)</option>`;
+                }).join('');
+            }
+            document.getElementById('links-legend').innerHTML =
+                Object.entries(LINK_FILL).map(([k, c]) => `<span><i class="legend-swatch" style="background:${c}"></i>${k}</span>`).join('') +
+                '<span><i class="legend-swatch" style="background:transparent;border:1px dashed #4caf50"></i>gone quiet</span>' +
+                [...new Map(Object.values(MARKS).map(m => [m.label, m.colour]))].map(([l, c]) => `<span><i class="legend-mark" style="border-top-color:${c}"></i>${l}</span>`).join('') +
+                '<span><i class="legend-swatch" style="background:rgba(255,255,255,0.35);height:6px"></i>frames</span>';
+        }
+
+        function timelineRange() {
+            if (tl.zoom) return tl.zoom;
+            if (tl.day === 0) { const now = Date.now(); return { from: now - DAY_MS, to: now }; }
+            const midnight = new Date(); midnight.setUTCHours(0, 0, 0, 0);
+            const to = midnight.getTime() - (tl.day - 1) * DAY_MS;
+            return { from: to - DAY_MS, to };
+        }
+
+        function setTimelineDay(day) {
+            tl.day = day; tl.zoom = null; tl.sel = null; tl.follow = day === 0; tl.page = 0;
+            loadTimeline();
+        }
+
+        function zoomToSelection() {
+            if (!tl.sel) return;
+            tl.zoom = { from: tl.sel.s, to: tl.sel.e };
+            loadTimeline();
+        }
+
+        function resetZoom() {
+            tl.zoom = null;
+            loadTimeline();
+        }
+
+        async function loadTimeline() {
+            const { from, to } = timelineRange();
+            const live = tl.day === 0 && !tl.zoom;
+            try {
+                tl.data = await api('GET', live ? '/timeline' : `/timeline?from=${Math.round(from)}&to=${Math.round(to)}`);
+            } catch (e) {
+                document.getElementById('links-status').textContent = 'Failed to load: ' + e.message;
+                return;
+            }
+            const d = tl.data;
+            const span = Math.min(30 * 60000, d.to - d.from);
+            if (!tl.sel) {
+                tl.sel = { s: d.to - span, e: d.to };
+            } else if (tl.follow && live) {
+                const len = tl.sel.e - tl.sel.s;
+                tl.sel = { s: d.to - len, e: d.to };
+            }
+            tl.sel.s = Math.max(d.from, tl.sel.s);
+            tl.sel.e = Math.min(d.to, tl.sel.e);
+            document.getElementById('links-status').textContent =
+                (d.persistent ? '' : 'History in memory only. ') + 'Updated ' + fmtTime(d.now) + ' UTC';
+            document.getElementById('links-zoom').disabled = false;
+            document.getElementById('links-unzoom').disabled = !tl.zoom;
+            renderTimeline();
+            loadFrames();
+        }
+
+        // Layout constants (px)
+        // Row: markers on top (1-8), state bar (9-19), frame activity along the bottom (20-27)
+        const TL = { label: 200, right: 12, axis: 22, track: 20, row: 28, group: 24 };
+
+        function timelineRows() {
+            const d = tl.data;
+            const byModem = new Map();
+            for (const r of d.rows) {
+                if (!byModem.has(r.modem)) byModem.set(r.modem, { links: [], heard: [] });
+                byModem.get(r.modem)[r.local == null ? 'heard' : 'links'].push(r);
+            }
+            const out = [];
+            for (const [modem, g] of byModem) {
+                out.push({ kind: 'group', modem, count: g.links.length });
+                for (const r of g.links) out.push({ kind: 'link', row: r });
+                if (g.heard.length) {
+                    const open = tl.openHeard.has(modem);
+                    out.push({ kind: 'heard', modem, count: g.heard.length, open });
+                    if (open) for (const r of g.heard) out.push({ kind: 'link', row: r });
+                }
+            }
+            return out;
+        }
+
+        function renderTimeline() {
+            const d = tl.data;
+            const wrap = document.getElementById('timeline-wrap');
+            if (!d.rows.length) {
+                wrap.innerHTML = '<div class="links-empty">No frames in this window.</div>';
+                return;
+            }
+            const width = Math.max(600, wrap.clientWidth);
+            const plotW = width - TL.label - TL.right;
+            const x = t => TL.label + (t - d.from) / (d.to - d.from) * plotW;
+            const items = timelineRows();
+            let y = TL.axis + TL.track;
+            const parts = [];
+            const multiDay = d.to - d.from > DAY_MS / 2 && new Date(d.from).getUTCDate() !== new Date(d.to).getUTCDate();
+
+            for (const it of items) {
+                if (it.kind === 'group') {
+                    parts.push(`<rect x="0" y="${y}" width="${width}" height="${TL.group}" fill="rgba(15,52,96,0.5)"/>`);
+                    parts.push(`<text x="10" y="${y + 16}" font-weight="bold">${esc(it.modem)}</text><text x="${10 + it.modem.length * 9 + 8}" y="${y + 16}" class="muted">${it.count} link${it.count === 1 ? '' : 's'}</text>`);
+                    y += TL.group;
+                } else if (it.kind === 'heard') {
+                    parts.push(`<g class="row-label" data-heard="${esc(it.modem)}"><rect x="0" y="${y}" width="${TL.label}" height="${TL.row}" fill="transparent"/>` +
+                        `<text x="14" y="${y + 18}" class="muted">${it.open ? '&#9662;' : '&#9656;'} Heard only (${it.count})</text></g>`);
+                    y += TL.row;
+                } else {
+                    parts.push(renderTimelineRow(it.row, y, width, x));
+                    y += TL.row;
+                }
+            }
+            const height = y + 6;
+            const top = TL.axis + TL.track;
+
+            // Axis ticks
+            const steps = [60e3, 300e3, 900e3, 1800e3, 3600e3, 7200e3, 10800e3, 21600e3];
+            const step = steps.find(s => (d.to - d.from) / s <= 12) || 43200e3;
+            const axis = [];
+            for (let t = Math.ceil(d.from / step) * step; t <= d.to; t += step) {
+                const xx = x(t);
+                const iso = new Date(t).toISOString();
+                const label = multiDay && iso.slice(11, 16) === '00:00' ? iso.slice(5, 10) : iso.slice(11, 16);
+                axis.push(`<line x1="${xx}" y1="${TL.axis - 4}" x2="${xx}" y2="${height}" stroke="rgba(255,255,255,0.07)"/>`);
+                axis.push(`<text x="${xx}" y="${TL.axis - 8}" text-anchor="middle" class="muted">${label}</text>`);
+            }
+            axis.push(`<text x="10" y="${TL.axis - 8}" class="muted">UTC</text>`);
+
+            // Selection: shaded body over the rows, handles on the track
+            const sx = x(tl.sel.s), ex = x(tl.sel.e);
+            const sel = `<rect class="track" id="tl-track" x="${TL.label}" y="${TL.axis}" width="${plotW}" height="${TL.track - 4}" rx="4" fill="rgba(255,255,255,0.06)"/>` +
+                `<rect class="sel-body" id="tl-sel" x="${sx}" y="${TL.axis}" width="${Math.max(1, ex - sx)}" height="${height - TL.axis}" fill="rgba(233,69,96,0.12)" stroke="rgba(233,69,96,0.6)"/>` +
+                `<rect class="handle" id="tl-h-start" x="${sx - 5}" y="${TL.axis - 2}" width="10" height="${TL.track}" rx="3" fill="#e94560"/>` +
+                `<rect class="handle" id="tl-h-end" x="${ex - 5}" y="${TL.axis - 2}" width="10" height="${TL.track}" rx="3" fill="#e94560"/>`;
+
+            wrap.innerHTML = `<svg id="timeline-svg" viewBox="0 0 ${width} ${height}" height="${height}">${axis.join('')}${parts.join('')}${sel}</svg>`;
+            attachTimelineEvents(x, plotW);
+        }
+
+        function renderTimelineRow(r, y, width, x) {
+            const d = tl.data;
+            const isFilter = tl.filter && tl.filter.modem === r.modem && tl.filter.remote === r.remote && tl.filter.local === (r.local ?? '');
+            const out = [];
+            if (isFilter) out.push(`<rect x="0" y="${y}" width="${width}" height="${TL.row}" fill="rgba(233,69,96,0.10)"/>`);
+            out.push(`<line x1="${TL.label}" y1="${y + TL.row}" x2="${width}" y2="${y + TL.row}" stroke="rgba(255,255,255,0.04)"/>`);
+
+            // Label: partner, and our call on that link
+            const via = r.local ? ` via ${r.local}` : '';
+            out.push(`<g class="row-label" data-modem="${esc(r.modem)}" data-local="${esc(r.local ?? '')}" data-remote="${esc(r.remote)}">` +
+                `<rect x="0" y="${y}" width="${TL.label}" height="${TL.row}" fill="transparent"/>` +
+                `<text x="${r.local ? 14 : 24}" y="${y + 18}"${isFilter ? ' font-weight="bold"' : ''}>${esc(r.remote)}<tspan class="muted" font-size="11">${esc(via)}</tspan></text>` +
+                `<title>Show only frames for ${esc(r.remote)}${esc(via)} on ${esc(r.modem)}</title></g>`);
+
+            // Frame activity, faint, along the bottom of the row
+            const maxCount = Math.max(1, ...d.rows.flatMap(rr => rr.activity.map(a => a.rx + a.tx)));
+            const bw = Math.max(1, (x(d.from + d.bucketMs) - x(d.from)));
+            for (const a of r.activity) {
+                const n = a.rx + a.tx;
+                const h = 2 + Math.sqrt(n / maxCount) * 5;
+                out.push(`<rect x="${x(a.t)}" y="${y + TL.row - h - 1}" width="${bw}" height="${h}" fill="rgba(255,255,255,0.35)"><title>${fmtTime(a.t, true)}: ${a.rx} received, ${a.tx} sent</title></rect>`);
+            }
+
+            // Link state bars
+            for (const g of r.segments) {
+                const x1 = x(g.s), w = Math.max(2, x(g.e) - x1);
+                const fill = LINK_FILL[g.state] || '#9e9e9e';
+                const style = g.silent ? `fill="${fill}" fill-opacity="0.25" stroke="${fill}" stroke-dasharray="3 2"` : `fill="${fill}" fill-opacity="0.85"`;
+                out.push(`<rect x="${x1}" y="${y + 9}" width="${w}" height="10" rx="2" ${style}>` +
+                    `<title>${esc(g.state)} ${fmtTime(g.s, true)} to ${fmtTime(g.e, true)}${g.detail ? ': ' + esc(g.detail) : ''}${g.silent ? ' (then went quiet)' : ''}</title></rect>`);
+            }
+
+            // Trouble markers (the server merges close ones), merged again per few pixels
+            const bins = new Map();
+            for (const m of r.markers) {
+                const key = Math.round(x(m.t) / 4) + '|' + m.kind;
+                if (!bins.has(key)) bins.set(key, { x: x(m.t), kind: m.kind, count: 0, details: [] });
+                const b = bins.get(key);
+                b.count += m.count;
+                b.details.push(...m.details);
+            }
+            for (const b of bins.values()) {
+                const mark = MARKS[b.kind] || { colour: '#fff', label: b.kind };
+                const n = b.count;
+                const lines = b.details.slice(0, 4).join('\n') + (n > 4 ? `\n... and ${n - 4} more` : '');
+                out.push(`<path d="M${b.x - 4},${y + 1} L${b.x + 4},${y + 1} L${b.x},${y + 8} Z" fill="${mark.colour}">` +
+                    `<title>${esc(mark.label)}${n > 1 ? ' x' + n : ''}\n${esc(lines)}</title></path>`);
+            }
+            return out.join('');
+        }
+
+        function attachTimelineEvents(x, plotW) {
+            const svg = document.getElementById('timeline-svg');
+            const d = tl.data;
+            const toTime = clientX => {
+                const box = svg.getBoundingClientRect();
+                const px = (clientX - box.left) * (svg.viewBox.baseVal.width / box.width);
+                const t = d.from + (px - TL.label) / plotW * (d.to - d.from);
+                return Math.min(d.to, Math.max(d.from, t));
+            };
+
+            svg.querySelectorAll('.row-label').forEach(g => g.addEventListener('click', () => {
+                if (g.dataset.heard !== undefined) {
+                    const m = g.dataset.heard;
+                    tl.openHeard.has(m) ? tl.openHeard.delete(m) : tl.openHeard.add(m);
+                    renderTimeline();
+                    return;
+                }
+                const f = { modem: g.dataset.modem, local: g.dataset.local, remote: g.dataset.remote };
+                const same = tl.filter && tl.filter.modem === f.modem && tl.filter.local === f.local && tl.filter.remote === f.remote;
+                tl.filter = same ? null : f;
+                tl.page = 0;
+                renderTimeline();
+                loadFrames();
+            }));
+
+            const start = (mode, e) => {
+                e.preventDefault();
+                svg.setPointerCapture(e.pointerId);
+                tl.drag = { mode, t0: toTime(e.clientX), s: tl.sel.s, e: tl.sel.e };
+            };
+            svg.querySelector('#tl-h-start').addEventListener('pointerdown', e => start('start', e));
+            svg.querySelector('#tl-h-end').addEventListener('pointerdown', e => start('end', e));
+            svg.querySelector('#tl-sel').addEventListener('pointerdown', e => start('move', e));
+            svg.querySelector('#tl-track').addEventListener('pointerdown', e => start('new', e));
+
+            svg.addEventListener('pointermove', e => {
+                if (!tl.drag) return;
+                const t = toTime(e.clientX), g = tl.drag;
+                if (g.mode === 'start') tl.sel = { s: Math.min(t, g.e - 1000), e: g.e };
+                else if (g.mode === 'end') tl.sel = { s: g.s, e: Math.max(t, g.s + 1000) };
+                else if (g.mode === 'move') {
+                    const len = g.e - g.s;
+                    const s = Math.min(d.to - len, Math.max(d.from, g.s + (t - g.t0)));
+                    tl.sel = { s, e: s + len };
+                } else tl.sel = { s: Math.min(g.t0, t), e: Math.max(g.t0, t, Math.min(g.t0, t) + 1000) };
+                const sx = x(tl.sel.s), ex = x(tl.sel.e);
+                svg.querySelector('#tl-sel').setAttribute('x', sx);
+                svg.querySelector('#tl-sel').setAttribute('width', Math.max(1, ex - sx));
+                svg.querySelector('#tl-h-start').setAttribute('x', sx - 5);
+                svg.querySelector('#tl-h-end').setAttribute('x', ex - 5);
+                showFramesHeader(null);
+            });
+            const end = () => {
+                if (!tl.drag) return;
+                tl.drag = null;
+                tl.follow = tl.day === 0 && !tl.zoom && tl.sel.e >= d.to - 1000;
+                tl.page = 0;
+                loadFrames();
+            };
+            svg.addEventListener('pointerup', end);
+            svg.addEventListener('pointercancel', end);
+        }
+
+        function showFramesHeader(total) {
+            const withDate = tl.data && tl.data.to - tl.data.from > DAY_MS / 2;
+            const range = `${fmtTime(tl.sel.s, withDate)} to ${fmtTime(tl.sel.e, withDate)} UTC`;
+            const f = tl.filter;
+            const chip = f ? ` <span class="filter-chip" onclick="clearFrameFilter()" title="Show all links">${esc(f.remote)}${f.local ? ' via ' + esc(f.local) : ''} on ${esc(f.modem)} &#10005;</span>` : '';
+            let paging = '';
+            if (total !== null) {
+                const first = total ? tl.page * PAGE + 1 : 0, last = Math.min(total, (tl.page + 1) * PAGE);
+                paging = ` <span>${first}-${last} of ${total}</span>` +
+                    `<button onclick="framesPage(-1)" ${tl.page ? '' : 'disabled'}>Earlier</button>` +
+                    `<button onclick="framesPage(1)" ${last < total ? '' : 'disabled'}>Later</button>`;
+            }
+            document.getElementById('frames-header').innerHTML = `<span>Frames ${range}</span>${chip}${paging}`;
+        }
+
+        function clearFrameFilter() {
+            tl.filter = null; tl.page = 0;
+            renderTimeline();
+            loadFrames();
+        }
+
+        function framesPage(delta) {
+            tl.page = Math.max(0, tl.page + delta);
+            loadFrames();
+        }
+
+        async function loadFrames() {
+            if (!tl.sel) return;
+            const q = new URLSearchParams({ from: Math.round(tl.sel.s), to: Math.round(tl.sel.e), offset: tl.page * PAGE, limit: PAGE });
+            if (tl.filter) { q.set('modem', tl.filter.modem); q.set('local', tl.filter.local); q.set('remote', tl.filter.remote); }
+            let res;
+            try { res = await api('GET', '/frames?' + q); } catch (e) { return; }
+            showFramesHeader(res.total);
+            const withDate = tl.data && tl.data.to - tl.data.from > DAY_MS / 2;
+            const rows = res.frames.map((f, i) =>
+                `<tr class="frame-row ${f.dir.toLowerCase()}" data-i="${i}">` +
+                `<td>${fmtTime(f.t, withDate)}.${String(f.t % 1000).padStart(3, '0').slice(0, 1)}</td><td>${esc(f.modem)}</td><td class="dir">${f.dir}</td>` +
+                `<td>${esc(f.src)}</td><td>${esc(f.dest)}${f.path ? ' via ' + esc(f.path) : ''}</td><td>${esc(f.frame)}</td>` +
+                `<td class="text">${esc(f.text)}</td><td>${f.snr === null || f.snr === undefined ? '' : f.snr.toFixed(1)}</td></tr>`);
+            const table = document.getElementById('frames-table');
+            table.innerHTML = '<thead><tr><th>Time</th><th>Port</th><th>Dir</th><th>From</th><th>To</th><th>Frame</th><th>Content</th><th>SNR dB</th></tr></thead>' +
+                `<tbody>${rows.join('') || '<tr><td colspan="8" style="color:var(--text-muted);padding:12px">No frames in the selection.</td></tr>'}</tbody>`;
+            table.querySelectorAll('tr.frame-row').forEach(tr => tr.addEventListener('click', () => {
+                const next = tr.nextElementSibling;
+                if (next && next.classList.contains('raw-row')) { next.remove(); return; }
+                const f = res.frames[parseInt(tr.dataset.i)];
+                tr.insertAdjacentHTML('afterend', `<tr class="raw-row"><td colspan="8">${f.raw.match(/../g).join(' ')}</td></tr>`);
+            }));
+        }
+
+        window.addEventListener('resize', () => { if (tl.data && document.getElementById('links-view').style.display === 'block') renderTimeline(); });
     </script>
 </body>
 </html>

@@ -41,7 +41,8 @@ public static class WebApi
         IEndpointRouteBuilder app,
         ConfigManager configManager,
         ModemStateManager stateManager,
-        IReadOnlyDictionary<string, KissProxy> proxyInstances)
+        IReadOnlyDictionary<string, KissProxy> proxyInstances,
+        LinkMonitor linkMonitor)
     {
         // Login endpoint (no auth required)
         app.MapPost("/api/login", (HttpContext ctx) => HandleLogin(ctx, configManager));
@@ -326,6 +327,60 @@ public static class WebApi
             return Results.Json(modes, JsonOptions);
         });
 
+        // Link timeline: one row per link (or heard-only station) for a window, default the last 24 h
+        api.MapGet("/timeline", (long? from, long? to) =>
+        {
+            var now = DateTime.UtcNow;
+            var (start, end) = Window(from, to, now);
+            var timeline = TimelineBuilder.Build(linkMonitor, start, end, now);
+            return Results.Json(new
+            {
+                from = FrameStore.ToMs(timeline.From),
+                to = FrameStore.ToMs(timeline.To),
+                now = FrameStore.ToMs(now),
+                bucketMs = (long)timeline.Bucket.TotalMilliseconds,
+                persistent = linkMonitor.Store.IsPersistent,
+                rows = timeline.Rows.Select(r => new
+                {
+                    modem = r.Modem,
+                    local = r.Local,
+                    remote = r.Remote,
+                    segments = r.Segments.Select(g => new { s = FrameStore.ToMs(g.Start), e = FrameStore.ToMs(g.End), state = g.State, detail = g.Detail, silent = g.Silent }),
+                    markers = r.Markers.Select(m => new { t = FrameStore.ToMs(m.Time), kind = m.Kind, count = m.Count, details = m.Details }),
+                    activity = r.Activity.Select(a => new { t = FrameStore.ToMs(a.Start), rx = a.Received, tx = a.Transmitted }),
+                }),
+            }, SseJsonOptions);
+        });
+
+        // Frames in a window, oldest first; local="" selects heard-only frames
+        api.MapGet("/frames", (long? from, long? to, string? modem, string? local, string? remote, int? offset, int? limit) =>
+        {
+            var (start, end) = Window(from, to, DateTime.UtcNow);
+            var frames = linkMonitor.Store.QueryFrames(start, end, modem, local, remote,
+                Math.Max(0, offset ?? 0), Math.Clamp(limit ?? 500, 1, 2000), out var total);
+            return Results.Json(new
+            {
+                total,
+                frames = frames.Select(f =>
+                {
+                    var (frame, text) = SplitSummary(f.Summary);
+                    return new
+                    {
+                        t = FrameStore.ToMs(f.Timestamp),
+                        modem = f.Modem,
+                        dir = f.Transmitted ? "TX" : "RX",
+                        src = f.Source,
+                        dest = f.Dest,
+                        path = f.Path,
+                        frame,
+                        text,
+                        snr = f.Snr,
+                        raw = Convert.ToHexString(f.Raw),
+                    };
+                }),
+            }, SseJsonOptions);
+        });
+
         // Global config (web port, password, MQTT settings, callsign)
         api.MapGet("/global", () => new
         {
@@ -363,6 +418,28 @@ public static class WebApi
                 return Results.BadRequest(ex.Message);
             }
         });
+    }
+
+    // A window within the store's retention: default the last 24 h, at least a minute
+    private static (DateTime from, DateTime to) Window(long? from, long? to, DateTime now)
+    {
+        var end = to is { } t ? FrameStore.FromMs(t) : now;
+        var start = from is { } f ? FrameStore.FromMs(f) : end - TimeSpan.FromHours(24);
+        if (start < end - FrameStore.DefaultRetention)
+            start = end - FrameStore.DefaultRetention;
+        if (end - start < TimeSpan.FromMinutes(1))
+            start = end - TimeSpan.FromMinutes(1);
+        return (start, end);
+    }
+
+    // "SRC>DEST <RR C P R3> text" -> ("<RR C P R3>", "text")
+    private static (string frame, string text) SplitSummary(string summary)
+    {
+        int open = summary.IndexOf(" <", StringComparison.Ordinal);
+        int close = open < 0 ? -1 : summary.IndexOf('>', open + 2);
+        if (close < 0)
+            return (summary, "");
+        return (summary[(open + 1)..(close + 1)], summary[(close + 1)..].Trim());
     }
 
     private static IResult HandleLogin(HttpContext ctx, ConfigManager configManager)

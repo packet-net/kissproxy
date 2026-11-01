@@ -29,33 +29,50 @@ public static class Ax25Decoder
         if (payload.Count == 0)
             return null;
 
-        byte cmdByte = payload[0];
-        int port = cmdByte >> 4;
-        int command = cmdByte & 0x0F;
+        int port = payload[0] >> 4;
+        int command = payload[0] & 0x0F;
         string portPrefix = port != 0 ? $"p{port} " : "";
 
+        // Modem to host ACKMODE ack: just the two sequence bytes, sent once the frame is on air.
+        if (command == KissFrameBuilder.CMD_ACKMODE && payload.Count == 3)
+            return $"{portPrefix}ACKMODE ack seq={payload[1]:X2}{payload[2]:X2}";
+
+        var data = UnkissData(payload);
+        if (data == null)
+            return null;
+
+        string ackPrefix = data.AckSeq is { } seq ? $"ACKMODE seq={seq:X4} " : "";
+        return portPrefix + ackPrefix + Describe(data.Ax25);
+    }
+
+    /// <summary>
+    /// The AX.25 frame carried by a KISS data or ACKMODE frame, or null for anything else
+    /// (parameter commands, ACKMODE acks).
+    /// </summary>
+    public static KissData? UnkissData(byte[] kissFrame) => UnkissData(Unescape(kissFrame));
+
+    private static KissData? UnkissData(List<byte> payload)
+    {
+        if (payload.Count < 2)
+            return null;
+
+        int port = payload[0] >> 4;
+        int command = payload[0] & 0x0F;
+
         if (command == KissFrameBuilder.CMD_DATAFRAME)
-            return portPrefix + Describe(payload.Skip(1).ToArray());
+            return new KissData(port, payload.Skip(1).ToArray(), null);
 
-        if (command == KissFrameBuilder.CMD_ACKMODE)
-        {
-            if (payload.Count < 3)
-                return null;
-
-            string seq = $"{payload[1]:X2}{payload[2]:X2}";
-
-            // Modem to host: just the two sequence bytes, sent once the frame is on air.
-            if (payload.Count == 3)
-                return $"{portPrefix}ACKMODE ack seq={seq}";
-
-            return $"{portPrefix}ACKMODE seq={seq} " + Describe(payload.Skip(3).ToArray());
-        }
+        if (command == KissFrameBuilder.CMD_ACKMODE && payload.Count > 3)
+            return new KissData(port, payload.Skip(3).ToArray(), (payload[1] << 8) | payload[2]);
 
         return null;
     }
 
-    /// <summary>Decodes a raw AX.25 frame (no KISS framing, no FCS).</summary>
-    public static string Describe(byte[] frame)
+    /// <summary>
+    /// Parses the AX.25 header fields, or returns null if the address field is malformed.
+    /// Stateless, so it assumes modulo-8 sequence numbers.
+    /// </summary>
+    public static Ax25Fields? Parse(byte[] frame)
     {
         // Address field: destination, source, then up to 8 digipeaters,
         // terminated by the extension bit in the last SSID byte.
@@ -70,78 +87,101 @@ public static class Ax25Decoder
         }
 
         if (addrEnd < 14 || addrEnd >= frame.Length)
-            return $"undecodable len={frame.Length}: {Hex(frame, 0, Math.Min(frame.Length, 24))}";
+            return null;
 
-        var sb = new StringBuilder();
-        sb.Append(Callsign(frame, 7)).Append('>').Append(Callsign(frame, 0));
+        var digis = new List<string>();
         for (int offset = 14; offset < addrEnd; offset += 7)
-        {
-            sb.Append(',').Append(Callsign(frame, offset));
-            if ((frame[offset + 6] & 0x80) != 0)
-                sb.Append('*');
-        }
+            digis.Add(Callsign(frame, offset) + ((frame[offset + 6] & 0x80) != 0 ? "*" : ""));
 
         bool destC = (frame[6] & 0x80) != 0;
         bool srcC = (frame[13] & 0x80) != 0;
-        string? cr = destC && !srcC ? "C" : !destC && srcC ? "R" : null;
-        bool isCommand = cr != "R";
+        char? cr = destC && !srcC ? 'C' : !destC && srcC ? 'R' : null;
 
         byte ctrl = frame[addrEnd];
         bool pf = (ctrl & 0x10) != 0;
-        string pfText = pf ? (isCommand ? " P" : " F") : "";
-        string crText = cr != null ? $" {cr}" : "";
         int infoStart = addrEnd + 1;
 
-        sb.Append(' ');
-
+        string type;
+        int? ns = null, nr = null, pid = null;
         if ((ctrl & 0x01) == 0)
         {
-            int ns = (ctrl >> 1) & 7;
-            int nr = (ctrl >> 5) & 7;
-            sb.Append($"<I{crText}{pfText} S{ns} R{nr}>");
-            AppendPidAndInfo(sb, frame, infoStart, ui: false);
-            return sb.ToString();
+            type = "I";
+            ns = (ctrl >> 1) & 7;
+            nr = (ctrl >> 5) & 7;
         }
-
-        if ((ctrl & 0x03) == 0x01)
+        else if ((ctrl & 0x03) == 0x01)
         {
-            string type = (ctrl & 0x0C) switch
+            type = (ctrl & 0x0C) switch
             {
                 0x00 => "RR",
                 0x04 => "RNR",
                 0x08 => "REJ",
                 _ => "SREJ",
             };
-            sb.Append($"<{type}{crText}{pfText} R{(ctrl >> 5) & 7}>");
-            return sb.ToString();
+            nr = (ctrl >> 5) & 7;
+        }
+        else
+        {
+            type = (ctrl & 0xEF) switch
+            {
+                0x2F => "SABM",
+                0x6F => "SABME",
+                0x43 => "DISC",
+                0x63 => "UA",
+                0x0F => "DM",
+                0x87 => "FRMR",
+                0xAF => "XID",
+                0xE3 => "TEST",
+                0x03 => "UI",
+                _ => $"U{ctrl:X2}",
+            };
         }
 
-        string u = (ctrl & 0xEF) switch
+        if ((type == "I" || type == "UI") && infoStart < frame.Length)
         {
-            0x2F => "SABM",
-            0x6F => "SABME",
-            0x43 => "DISC",
-            0x63 => "UA",
-            0x0F => "DM",
-            0x87 => "FRMR",
-            0xAF => "XID",
-            0xE3 => "TEST",
-            0x03 => "UI",
-            _ => $"U{ctrl:X2}",
-        };
-        sb.Append($"<{u}{crText}{pfText}>");
+            pid = frame[infoStart];
+            infoStart++;
+        }
 
-        switch (u)
+        return new Ax25Fields(Callsign(frame, 7), Callsign(frame, 0), digis, type, cr, pf, ns, nr, pid,
+            infoStart, Math.Max(0, frame.Length - infoStart));
+    }
+
+    /// <summary>Decodes a raw AX.25 frame (no KISS framing, no FCS).</summary>
+    public static string Describe(byte[] frame)
+    {
+        var f = Parse(frame);
+        if (f == null)
+            return $"undecodable len={frame.Length}: {Hex(frame, 0, Math.Min(frame.Length, 24))}";
+
+        var sb = new StringBuilder();
+        sb.Append(f.Source).Append('>').Append(f.Dest);
+        foreach (var digi in f.Digis)
+            sb.Append(',').Append(digi);
+
+        string crText = f.CommandResponse is { } cr ? $" {cr}" : "";
+        string pfText = f.PollFinal ? (f.CommandResponse == 'R' ? " F" : " P") : "";
+
+        sb.Append(" <").Append(f.Type).Append(crText).Append(pfText);
+        if (f.Ns is { } ns)
+            sb.Append($" S{ns}");
+        if (f.Nr is { } nr)
+            sb.Append($" R{nr}");
+        sb.Append('>');
+
+        switch (f.Type)
         {
-            case "UI":
-                AppendPidAndInfo(sb, frame, infoStart, ui: true);
+            case "I" or "UI" when f.Pid != null:
+                AppendPidAndInfo(sb, frame, f.InfoStart - 1, ui: f.Type == "UI");
+                break;
+            case "I" or "UI":
                 break;
             case "XID":
-                AppendXid(sb, frame, infoStart);
+                AppendXid(sb, frame, f.InfoStart);
                 break;
             default:
-                if (infoStart < frame.Length)
-                    sb.Append($" len={frame.Length - infoStart}: {Hex(frame, infoStart, Math.Min(frame.Length - infoStart, 16))}");
+                if (f.InfoLength > 0)
+                    sb.Append($" len={f.InfoLength}: {Hex(frame, f.InfoStart, Math.Min(f.InfoLength, 16))}");
                 break;
         }
 
@@ -330,4 +370,26 @@ public static class Ax25Decoder
         }
         return result;
     }
+}
+
+/// <summary>The AX.25 frame inside a KISS data or ACKMODE frame.</summary>
+public sealed record KissData(int Port, byte[] Ax25, int? AckSeq);
+
+/// <summary>Header fields of an AX.25 frame, as decoded by <see cref="Ax25Decoder.Parse"/>.</summary>
+/// <param name="CommandResponse">'C' or 'R', or null for an AX.25 v1 frame that doesn't say</param>
+/// <param name="InfoStart">Offset of the information field (after the PID, if any)</param>
+public sealed record Ax25Fields(
+    string Source,
+    string Dest,
+    IReadOnlyList<string> Digis,
+    string Type,
+    char? CommandResponse,
+    bool PollFinal,
+    int? Ns,
+    int? Nr,
+    int? Pid,
+    int InfoStart,
+    int InfoLength)
+{
+    public bool IsCommand => CommandResponse != 'R';
 }

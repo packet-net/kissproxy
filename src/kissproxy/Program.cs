@@ -73,7 +73,14 @@ var stateManager = new ModemStateManager();
 // Cancellation token for graceful shutdown
 var cts = new CancellationTokenSource();
 
-var modemRunner = new ModemRunner(configManager, stateManager, LogInfo, cts.Token);
+// Frame history for the link timeline: alongside the config when run from source
+var frameDbPath = configPath == "/etc/kissproxy.conf" ? "/var/lib/kissproxy/frames.db" : "kissproxy-frames.db";
+var frameStore = new FrameStore(frameDbPath, new ConsoleLogger());
+var linkMonitor = new LinkMonitor(frameStore, configManager.Config.MyCallsign);
+configManager.GlobalConfigChanged += () => linkMonitor.MyCallsign = configManager.Config.MyCallsign;
+LogInfo(frameStore.IsPersistent ? $"Frame history in {frameDbPath}" : "Frame history in memory only");
+
+var modemRunner = new ModemRunner(configManager, stateManager, linkMonitor, LogInfo, cts.Token);
 
 // Start web server
 var builder = WebApplication.CreateBuilder();
@@ -88,7 +95,11 @@ builder.Services.AddLogging(logging =>
 // Reduce shutdown timeout so SSE connections don't block exit for 30 seconds
 builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSeconds(5));
 
+// The timeline's JSON is a few hundred KB; it compresses well
+builder.Services.AddResponseCompression(o => o.MimeTypes = ["application/json"]);
+
 var app = builder.Build();
+app.UseResponseCompression();
 
 // Wire ASP.NET Core shutdown lifecycle to our cancellation token (and vice versa).
 // This ensures: Ctrl-C stops proxy tasks, and cts.Cancel() from any source stops the web host.
@@ -129,7 +140,7 @@ else
 }
 
 // Map API endpoints
-WebApi.MapEndpoints(app, configManager, stateManager, modemRunner.Proxies);
+WebApi.MapEndpoints(app, configManager, stateManager, modemRunner.Proxies, linkMonitor);
 
 // Start modem proxy tasks
 foreach (var modemConfig in configManager.Modems)
@@ -154,8 +165,9 @@ catch (Exception ex)
     cts.Cancel();
 }
 
-// Wait for proxy tasks to complete
+// Wait for proxy tasks to complete, then write out the last of the frame history
 await modemRunner.WhenAllStopped();
+frameStore.Dispose();
 
 return 0;
 

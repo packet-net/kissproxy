@@ -35,6 +35,12 @@ kissproxylib is a .NET library version which can be used to integrate a KISS pro
 - **One line per AX.25 frame** to and from each modem, decoded in-process (AX.25, XID parameters, NET/ROM L3/L4 and NODES), in the console output, so `journalctl -u kissproxy` shows it
 - Lines look like `[6m] RX GB7WIN>M0LTE <RR C P R3>`; TX means handed to the modem, which is not proof it went on air
 
+### Link Timeline
+- **Links tab** in the web UI: a timeline of the last 24 hours (or any of the last 7 days), one row per connection (our callsign and a link partner), grouped by port, with stations only heard folded away
+- Bars show when each link was connecting, up, or disconnecting; markers show trouble: resent frames, polls that get nowhere, repeated or unanswered connects, rejects, refusals and unexpected disconnects
+- Drag the two handles to pick a window; the table below lists its frames (time, port, direction, from, to, frame, content, SNR). Click a row's name to show only that link; click a frame for its raw bytes
+- Frames are kept for 7 days in SQLite at `/var/lib/kissproxy/frames.db` (next to the config when run from source), written in batches every 5 minutes to spare SD cards
+
 ### MQTT Integration
 - **Frame tracing**: publish all KISS traffic to MQTT topics
 - **Multiple topic formats**: framed, unframed, and decoded

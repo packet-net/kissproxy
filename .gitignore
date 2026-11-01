@@ -7,3 +7,4 @@ publish
 src/kissproxy/kissproxy
 src/kissproxy/wwwroot/*.br
 src/kissproxy/wwwroot/*.gz
+src/kissproxy/kissproxy-frames.db*
