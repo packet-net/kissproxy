@@ -197,6 +197,52 @@ public class RadioSignalTests : IDisposable
         monitor.Attribute(T0.AddSeconds(10.5), 40, 9600)!.SampleCount.Should().Be(10);
     }
 
+    [Fact]
+    public void DenseReadings_ASpikeBarelyMovesTheFloor()
+    {
+        // Continuous reads: one every 14 ms
+        radio.Busy = false;
+        for (var t = T0; t < T0.AddSeconds(20); t += TimeSpan.FromMilliseconds(14))
+            monitor.Record(t, -121);
+        monitor.Record(T0.AddSeconds(20.014), -100);
+
+        monitor.NoiseFloorDbm.Should().BeApproximately(-121, 0.1f);
+    }
+
+    [Fact]
+    public void DenseReadings_FloorFollowsARealChangeOverSeconds()
+    {
+        radio.Busy = false;
+        for (var t = T0; t < T0.AddSeconds(20); t += TimeSpan.FromMilliseconds(14))
+            monitor.Record(t, -121);
+        for (var t = T0.AddSeconds(20); t < T0.AddSeconds(30); t += TimeSpan.FromMilliseconds(14))
+            monitor.Record(t, -111);
+
+        // Ten seconds at -111 with a 10 s time constant: most of the way there, not all
+        monitor.NoiseFloorDbm.Should().BeInRange(-115, -113);
+    }
+
+    [Fact]
+    public void ShortBurstAt9600_GetsSeveralReadings()
+    {
+        // A 15-byte RR at 9600 baud with a 50 ms TXDELAY: about 65 ms of carrier
+        radio.Busy = false;
+        for (var t = T0; t < T0.AddSeconds(5); t += TimeSpan.FromMilliseconds(14))
+            monitor.Record(t, -125);
+        var rise = T0.AddSeconds(5);
+        radio.Busy = true;
+        monitor.OnCarrierSense(true, rise);
+        for (var t = rise; t < rise.AddMilliseconds(65); t += TimeSpan.FromMilliseconds(14))
+            monitor.Record(t, -113);
+        radio.Busy = false;
+        monitor.OnCarrierSense(false, rise.AddMilliseconds(65));
+
+        var meta = monitor.Attribute(rise.AddMilliseconds(90), 15, 9600);
+
+        meta!.SampleCount.Should().BeGreaterThanOrEqualTo(4);
+        meta.SnrDb.Should().BeApproximately(12, 0.5f);
+    }
+
     private sealed class FakeRadio : IRadioControl
     {
         public RadioCapabilities Capabilities { get; init; } = RadioCapabilities.RssiRead | RadioCapabilities.CarrierSense;

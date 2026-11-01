@@ -14,17 +14,22 @@ public sealed record RadioMetadata(float? RssiDbm, float? SnrDb, float? NoiseFlo
 public sealed record NoiseSample(DateTime Timestamp, string Modem, float FloorDbm, float? MedianIdleDbm);
 
 /// <summary>
-/// Samples a radio's RSSI (often while the channel is busy, less often while idle, so the idle
-/// samples track the noise floor), follows its carrier-sense edges as transmission windows, and
-/// attributes RSSI and SNR to each received frame by matching its arrival time to the window that
-/// carried it. Ported from packet.net's RssiTaggingTransport (Packet.Ax25.Radio), whose defaults
-/// were bench-measured on Tait CCDI at 28800 baud: RSSI poll round trip 14 ms, carrier-edge
-/// latency about 27 ms.
+/// Reads a radio's RSSI continuously (each read straight after the last: about 70 a second on
+/// Tait CCDI at 28800 baud, whose round trip measured 14 ms), follows its carrier-sense edges as
+/// transmission windows, and attributes RSSI and SNR to each received frame by matching its
+/// arrival time to the window that carried it. Readings taken while the channel is idle track the
+/// noise floor. Ported from packet.net's RssiTaggingTransport (Packet.Ax25.Radio), which polls at
+/// 40 ms busy and 400 ms idle; that missed most short frames at 9600 baud (a 15-byte RR is on air
+/// for well under the idle period), so this one doesn't wait between reads.
 /// </summary>
 public sealed class RadioSignalMonitor : IAsyncDisposable
 {
-    public static readonly TimeSpan BusySamplePeriod = TimeSpan.FromMilliseconds(40);
-    public static readonly TimeSpan IdleSamplePeriod = TimeSpan.FromMilliseconds(400);
+    // After a failed read, so a radio that has gone away isn't polled flat out
+    private static readonly TimeSpan FailureBackoff = TimeSpan.FromMilliseconds(200);
+
+    // Reads are back to back, but never closer than this: a guard against spinning on a radio
+    // that answers instantly (a real CCDI read takes about 14 ms, so this never slows it)
+    private static readonly TimeSpan MinReadPeriod = TimeSpan.FromMilliseconds(5);
 
     // Samples kept for attribution; comfortably longer than any frame plus TXDELAY
     private static readonly TimeSpan SampleHorizon = TimeSpan.FromSeconds(10);
@@ -37,8 +42,9 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     private static readonly TimeSpan AttributionLookback = TimeSpan.FromSeconds(5);
     private const float SignalThresholdDb = 6f;
 
-    // EMA coefficient for the idle-sample noise floor
-    private const float NoiseFloorSmoothing = 0.2f;
+    // The noise floor is an exponential average of idle readings with this time constant, so it
+    // smooths the same however fast the readings come
+    private static readonly TimeSpan NoiseFloorTimeConstant = TimeSpan.FromSeconds(10);
 
     private readonly IRadioControl radio;
     private readonly string modem;
@@ -57,10 +63,6 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     private int consecutiveFailures;
     private int totalFailures;
     private volatile bool transmitting;
-
-    // Released on a carrier rise so the sampler skips the rest of its idle wait: at 9600 baud a
-    // whole frame can be shorter than the 400 ms idle period. Never disposed (see DisposeAsync).
-    private readonly SemaphoreSlim wake = new(0, 1);
 
     /// <param name="onNoiseSample">Called once a minute with that minute's noise floor</param>
     /// <param name="startSampling">False to drive samples by hand (tests)</param>
@@ -135,6 +137,7 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             // After the clock steps back, older-looking samples would never be pruned
             if (samples.Count > 0 && at < lastSampleAt - TimeSpan.FromSeconds(1))
                 samples.Clear();
+            var previousSampleAt = lastSampleAt;
             lastSampleAt = at;
 
             samples.Enqueue((at, dbm));
@@ -159,7 +162,20 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
                 : noiseFloorDbm is null || dbm < noiseFloorDbm.Value + SignalThresholdDb);
             if (idle)
             {
-                noiseFloorDbm = noiseFloorDbm is { } nf ? nf + NoiseFloorSmoothing * (dbm - nf) : dbm;
+                if (noiseFloorDbm is { } nf)
+                {
+                    // Weight by the time since the previous reading of any kind, so the first idle
+                    // reading after a busy spell (which may hold a signal's tail) counts no more
+                    // than any other; capped for gaps such as failed reads
+                    var dt = Math.Min((at - previousSampleAt).TotalSeconds, NoiseFloorTimeConstant.TotalSeconds);
+                    var alpha = 1 - Math.Exp(-Math.Max(dt, 0) / NoiseFloorTimeConstant.TotalSeconds);
+                    noiseFloorDbm = nf + alpha * (dbm - nf);
+                }
+                else
+                {
+                    noiseFloorDbm = dbm;
+                }
+
                 minuteIdle.Add(dbm);
             }
         }
@@ -176,8 +192,6 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             if (busy)
             {
                 currentWindow = new CarrierWindow(at);
-                if (wake.CurrentCount == 0)
-                    wake.Release();
             }
             else if (currentWindow is { } w)
             {
@@ -218,13 +232,17 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
 
     private async Task SampleLoopAsync(CancellationToken cancellationToken)
     {
+        var period = System.Diagnostics.Stopwatch.StartNew();
         while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
+                period.Restart();
                 var dbm = await radio.ReadRssiDbmAsync(cancellationToken);
                 Record(clock(), dbm);
                 Volatile.Write(ref consecutiveFailures, 0);
+                if (period.Elapsed < MinReadPeriod)
+                    await Task.Delay(MinReadPeriod - period.Elapsed, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -234,11 +252,9 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             {
                 Interlocked.Increment(ref consecutiveFailures);
                 Interlocked.Increment(ref totalFailures);
+                try { await Task.Delay(FailureBackoff, cancellationToken); }
+                catch (OperationCanceledException) { return; }
             }
-
-            bool busy = radio.ChannelBusy != false;
-            try { await wake.WaitAsync(busy ? BusySamplePeriod : IdleSamplePeriod, cancellationToken); }
-            catch (OperationCanceledException) { return; }
         }
     }
 
@@ -263,9 +279,6 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             try { await samplerLoop; } catch { }
         }
         cts.Dispose();
-        // wake is deliberately never disposed: the driver may still be delivering a carrier edge
-        // on its pump thread, and a Release on a disposed semaphore there would end the process.
-        // It holds no OS handle unless AvailableWaitHandle is used, which it isn't.
     }
 
     private sealed class CarrierWindow(DateTime riseAt)
