@@ -63,7 +63,6 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     private int consecutiveFailures;
     private int totalFailures;
     private volatile bool transmitting;
-    private DateTime lastIdleAt;
 
     /// <param name="onNoiseSample">Called once a minute with that minute's noise floor</param>
     /// <param name="startSampling">False to drive samples by hand (tests)</param>
@@ -138,6 +137,7 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             // After the clock steps back, older-looking samples would never be pruned
             if (samples.Count > 0 && at < lastSampleAt - TimeSpan.FromSeconds(1))
                 samples.Clear();
+            var previousSampleAt = lastSampleAt;
             lastSampleAt = at;
 
             samples.Enqueue((at, dbm));
@@ -164,9 +164,10 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             {
                 if (noiseFloorDbm is { } nf)
                 {
-                    // Weight by the time since the last idle reading (capped, so a long busy spell
-                    // doesn't let one reading replace the floor outright)
-                    var dt = Math.Min((at - lastIdleAt).TotalSeconds, NoiseFloorTimeConstant.TotalSeconds);
+                    // Weight by the time since the previous reading of any kind, so the first idle
+                    // reading after a busy spell (which may hold a signal's tail) counts no more
+                    // than any other; capped for gaps such as failed reads
+                    var dt = Math.Min((at - previousSampleAt).TotalSeconds, NoiseFloorTimeConstant.TotalSeconds);
                     var alpha = 1 - Math.Exp(-Math.Max(dt, 0) / NoiseFloorTimeConstant.TotalSeconds);
                     noiseFloorDbm = nf + alpha * (dbm - nf);
                 }
@@ -174,7 +175,7 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
                 {
                     noiseFloorDbm = dbm;
                 }
-                lastIdleAt = at;
+
                 minuteIdle.Add(dbm);
             }
         }
