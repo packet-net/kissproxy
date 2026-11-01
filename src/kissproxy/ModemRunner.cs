@@ -19,6 +19,9 @@ internal class ModemRunner(ConfigManager configManager, ModemStateManager stateM
 
     public void Start(Config config)
     {
+        if (shutdown.IsCancellationRequested)
+            return;
+
         var state = stateManager.GetOrCreate(config.Id);
         var proxy = new KissProxy(config.Id, new ConsoleLogger(config.Id));
         var cts = CancellationTokenSource.CreateLinkedTokenSource(shutdown);
@@ -58,6 +61,10 @@ internal class ModemRunner(ConfigManager configManager, ModemStateManager stateM
                     await StopAsync(id, current);
                     logInfo($"Stopped proxy for deleted modem '{id}'");
                 }
+
+                // Here rather than in the delete request, so a quick re-add (handled after
+                // this, in order) gets a fresh state instead of losing its proxy's one
+                stateManager.Remove(id);
             }
             else if (current == null)
             {

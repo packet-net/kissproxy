@@ -156,12 +156,15 @@ public class ConfigManager
             throw new InvalidOperationException($"Config file is not writeable: {configPath}");
         }
 
-        string json;
-        lock (sync)
-            json = JsonSerializer.Serialize(config, JsonOptions);
-
+        // Serialise and write under one lock, so concurrent saves can't land out of order
         lock (saveLock)
+        {
+            string json;
+            lock (sync)
+                json = JsonSerializer.Serialize(config, JsonOptions);
+
             WriteAtomically(json);
+        }
     }
 
     private readonly object saveLock = new();
@@ -171,19 +174,25 @@ public class ConfigManager
     // when the directory isn't writeable.
     private void WriteAtomically(string json)
     {
-        var dir = Path.GetDirectoryName(Path.GetFullPath(configPath)) ?? ".";
-        var temp = Path.Combine(dir, $".{Path.GetFileName(configPath)}.{Guid.NewGuid():N}.tmp");
+        // Replace the file a symlink points at, not the link
+        var target = File.ResolveLinkTarget(configPath, returnFinalTarget: true)?.FullName ?? Path.GetFullPath(configPath);
+        var dir = Path.GetDirectoryName(target) ?? ".";
+        var temp = Path.Combine(dir, $".{Path.GetFileName(target)}.{Guid.NewGuid():N}.tmp");
         try
         {
-            File.WriteAllText(temp, json);
-            if (!OperatingSystem.IsWindows() && File.Exists(configPath))
-                File.SetUnixFileMode(temp, File.GetUnixFileMode(configPath));
-            File.Move(temp, configPath, overwrite: true);
+            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write))
+            {
+                stream.Write(System.Text.Encoding.UTF8.GetBytes(json));
+                stream.Flush(flushToDisk: true);
+            }
+            if (!OperatingSystem.IsWindows() && File.Exists(target))
+                File.SetUnixFileMode(temp, File.GetUnixFileMode(target));
+            File.Move(temp, target, overwrite: true);
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
         {
             try { File.Delete(temp); } catch { }
-            File.WriteAllText(configPath, json);
+            File.WriteAllText(target, json);
         }
     }
 

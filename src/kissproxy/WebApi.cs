@@ -128,15 +128,16 @@ public static class WebApi
                 wake.Writer.TryWrite(true);
             }
 
-            // Initial state for all modems
+            // Subscribe before taking the initial state, so no change falls in between
+            // (a duplicate is harmless: coalescing sends it once)
+            stateManager.StateChanged += OnStateChanged;
+
             foreach (var modem in configManager.Modems)
             {
                 var state = stateManager.GetSnapshot(modem.Id);
                 if (state != null)
                     OnStateChanged(modem.Id, state);
             }
-
-            stateManager.StateChanged += OnStateChanged;
 
             try
             {
@@ -216,8 +217,8 @@ public static class WebApi
         {
             try
             {
+                // The runner stops the proxy and drops its state (ModemConfigChanged)
                 configManager.RemoveModem(id);
-                stateManager.Remove(id);
                 return Results.Ok();
             }
             catch (KeyNotFoundException)

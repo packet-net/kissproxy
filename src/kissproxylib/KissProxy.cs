@@ -196,6 +196,9 @@ public class KissProxy
         using var scope = BeginLoggingScope();
         logger.LogDebug("Starting");
 
+        if (cancellationToken.IsCancellationRequested)
+            return;
+
         if (!string.IsNullOrWhiteSpace(mqttServer))
         {
             var (server, port) = SplitMqttServer(mqttServer);
@@ -371,6 +374,16 @@ public class KissProxy
             frameProcessingQueue.Writer.TryComplete();
             try { await frameProcessingTask.WaitAsync(TimeSpan.FromSeconds(5)); }
             catch (TimeoutException) { }
+
+            // A proxy can now be stopped or restarted while the process runs; a leftover
+            // client would fight its replacement, which uses the same client id
+            if (mqttClient != null)
+            {
+                try { await mqttClient.StopAsync(); }
+                catch (Exception ex) { logger.LogWarning("Stopping MQTT client failed: {error}", ex.Message); }
+                mqttClient.Dispose();
+                mqttClient = null;
+            }
         }
     }
 
