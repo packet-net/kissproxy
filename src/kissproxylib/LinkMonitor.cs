@@ -56,7 +56,14 @@ public sealed class LinkMonitor : IDisposable
         }
     }
 
-    public void Dispose() => sweepTimer?.Dispose();
+    /// <summary>Stops the sweep, and gives frames still waiting for radio readings time to be stored.</summary>
+    public void Dispose()
+    {
+        sweepTimer?.Dispose();
+        var deadline = DateTime.UtcNow + attributionDelay + TimeSpan.FromSeconds(1);
+        while (Volatile.Read(ref waiting) > 0 && DateTime.UtcNow < deadline)
+            Thread.Sleep(20);
+    }
 
     public FrameStore Store => store;
 
@@ -107,13 +114,24 @@ public sealed class LinkMonitor : IDisposable
         }
 
         int length = data.Ax25.Length;
+        Interlocked.Increment(ref waiting);
         _ = Task.Delay(attributionDelay).ContinueWith(_ =>
         {
-            RadioMetadata? signal = null;
-            try { signal = radio!(length); } catch { }
-            store.Add(frame with { Snr = signal?.SnrDb, Rssi = signal?.RssiDbm, NoiseFloor = signal?.NoiseFloorDbm }, []);
+            try
+            {
+                RadioMetadata? signal = null;
+                try { signal = radio!(length); } catch { }
+                store.Add(frame with { Snr = signal?.SnrDb, Rssi = signal?.RssiDbm, NoiseFloor = signal?.NoiseFloorDbm }, []);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref waiting);
+            }
         }, TaskScheduler.Default);
     }
+
+    // Received frames still waiting for their radio readings
+    private int waiting;
 
     /// <summary>Every link's live state, with when it last saw a frame.</summary>
     public IReadOnlyList<(string Modem, string Local, string Remote, string State, DateTime LastFrame)> LiveLinks

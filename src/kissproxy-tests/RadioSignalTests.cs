@@ -333,6 +333,37 @@ public class RadioSignalTests : IDisposable
         store.QueryFrames(T0, T0.AddMinutes(1), null, null, null, 0, 10, out _).Single().Snr.Should().Be(13);
     }
 
+    [Fact]
+    public void QuickResponderJustAfter_DoesNotStealTheFrame_OnAPromptRadio()
+    {
+        // 2m-style radio: the frame's carrier is reported well before delivery
+        Idle(T0, TimeSpan.FromSeconds(5), -122);
+        var delivered = T0.AddSeconds(5);
+        Carrier(delivered.AddMilliseconds(-229), TimeSpan.FromMilliseconds(211), -109);
+        // A fast 9600 responder keys up 60 ms after delivery, much stronger, and is gone by the
+        // time the frame is attributed
+        Carrier(delivered.AddMilliseconds(60), TimeSpan.FromMilliseconds(100), -80);
+
+        monitor.Attribute(delivered, 60, 9600)!.RssiDbm.Should().Be(-109);
+    }
+
+    [Fact]
+    public void PreviousStationJustBefore_DoesNotStealTheFrame_OnALateRadio()
+    {
+        // 70cm-style late radio: the previous station's carrier ended 150 ms before delivery,
+        // and this frame's own carrier is only reported after delivery
+        Idle(T0, TimeSpan.FromSeconds(5), -126);
+        var delivered = T0.AddSeconds(5);
+        Carrier(delivered.AddMilliseconds(-450), TimeSpan.FromMilliseconds(300), -100);
+        radio.Busy = true;
+        monitor.OnCarrierSense(true, delivered.AddMilliseconds(5));
+        monitor.Record(delivered.AddMilliseconds(17), -113);
+        radio.Busy = false;
+        monitor.OnCarrierSense(false, delivered.AddMilliseconds(50));
+
+        monitor.Attribute(delivered, 15, 9600)!.RssiDbm.Should().Be(-113);
+    }
+
     private sealed class FakeRadio : IRadioControl
     {
         public RadioCapabilities Capabilities { get; init; } = RadioCapabilities.RssiRead | RadioCapabilities.CarrierSense;
