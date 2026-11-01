@@ -243,6 +243,31 @@ public class RadioSignalTests : IDisposable
         meta.SnrDb.Should().BeApproximately(12, 0.5f);
     }
 
+    [Fact]
+    public async Task SamplerThread_ReadsAndReportsItsRate()
+    {
+        // A clock that moves a second per reading, so a minute's stats come round quickly
+        long ticks = T0.Ticks;
+        var lines = new List<string>();
+        var m = new RadioSignalMonitor(radio, "70cm", clock: () => new DateTime(Interlocked.Add(ref ticks, TimeSpan.TicksPerSecond), DateTimeKind.Utc),
+            log: line => { lock (lines) lines.Add(line); });
+
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (lines) if (lines.Count > 0) break;
+            await Task.Delay(20);
+        }
+        await m.DisposeAsync();
+
+        lock (lines)
+        {
+            lines.Should().NotBeEmpty();
+            lines[0].Should().MatchRegex(@"^RSSI [0-9.]+ reads/s, [0-9.]+ ms average, [0-9]+ ms worst, 0 failed, noise floor -120\.0 dBm$");
+        }
+        m.NoiseFloorDbm.Should().Be(-120);
+    }
+
     private sealed class FakeRadio : IRadioControl
     {
         public RadioCapabilities Capabilities { get; init; } = RadioCapabilities.RssiRead | RadioCapabilities.CarrierSense;
