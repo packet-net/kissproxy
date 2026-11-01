@@ -34,6 +34,13 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     // Samples kept for attribution; comfortably longer than any frame plus TXDELAY
     private static readonly TimeSpan SampleHorizon = TimeSpan.FromSeconds(10);
 
+    // How long after a frame's delivery its carrier and readings may still turn up. A fast modem
+    // can hand over a short frame before a slower radio reports its carrier: on GB7RDG's 70cm
+    // Tait at 9600 baud, carrier rises were reported up to 52 ms and raised readings landed up
+    // to 45 ms after the NinoTNC delivered the frame. Callers attribute at least this long after
+    // delivery (LinkMonitor waits 250 ms) so those readings exist.
+    public static readonly TimeSpan LookAhead = TimeSpan.FromMilliseconds(100);
+
     // How long past carrier-fall a delivered frame can still belong to that window: the
     // modem's decode and serial delivery (measured 34-115 ms at 1200 baud)
     private static readonly TimeSpan WindowAttributionSlack = TimeSpan.FromMilliseconds(500);
@@ -113,9 +120,10 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
         {
             float? floor = noiseFloorDbm is { } nf ? (float)nf : null;
 
+            var latest = receivedAt + LookAhead;
             if (radio.Capabilities.HasFlag(RadioCapabilities.CarrierSense) && FindWindow(receivedAt, airtime) is { } window)
             {
-                var to = window.FallAt is { } fall && fall < receivedAt ? fall : receivedAt;
+                var to = window.FallAt is { } fall && fall < latest ? fall : latest;
                 var stats = Statistics(samples.Where(s => s.At >= window.RiseAt && s.At <= to).Select(s => s.Dbm));
                 if (stats is { } st)
                     return new RadioMetadata(st.Median, floor is { } f ? st.Median - f : null, floor, st.Count);
@@ -126,7 +134,7 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             // No carrier sense, or the window was missed: samples above the floor count as signal
             var from = receivedAt - AttributionLookback;
             var signal = samples
-                .Where(s => s.At >= from && s.At <= receivedAt && (floor == null || s.Dbm >= floor + SignalThresholdDb))
+                .Where(s => s.At >= from && s.At <= latest && (floor == null || s.Dbm >= floor + SignalThresholdDb))
                 .Select(s => s.Dbm);
             return Statistics(signal) is { } t
                 ? new RadioMetadata(t.Median, floor is { } f2 ? t.Median - f2 : null, floor, t.Count)
@@ -220,14 +228,16 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     // key inside it: a window that opened after the frame was already on air can't claim it.
     private CarrierWindow? FindWindow(DateTime receivedAt, TimeSpan? airtime)
     {
+        // A window that rose up to LookAhead after delivery can still be this frame's, reported late
+        var latestRise = receivedAt + LookAhead;
         CarrierWindow? closed = null;
         foreach (var w in windows)
         {
-            if (w.RiseAt <= receivedAt && receivedAt <= w.FallAt!.Value + WindowAttributionSlack)
+            if (w.RiseAt <= latestRise && receivedAt <= w.FallAt!.Value + WindowAttributionSlack)
                 closed = w;
         }
 
-        if (currentWindow is not { } open || open.RiseAt > receivedAt)
+        if (currentWindow is not { } open || open.RiseAt > latestRise)
             return closed;
         if (closed is null)
             return open;

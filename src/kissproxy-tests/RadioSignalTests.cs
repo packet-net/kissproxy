@@ -120,7 +120,7 @@ public class RadioSignalTests : IDisposable
     public void ReceivedFramesAreStoredWithSignal_TransmittedWithout()
     {
         using var store = new FrameStore(null, NullLogger.Instance, flushInterval: TimeSpan.Zero);
-        var links = new LinkMonitor(store, "GB7RDG", TimeSpan.Zero);
+        var links = new LinkMonitor(store, "GB7RDG", TimeSpan.Zero, attributionDelay: TimeSpan.Zero);
         var meta = new RadioMetadata(-90, 31, -121, 15);
         var ui = KissFrameBuilder.BuildKissDataFrame(KissFrameBuilder.BuildAx25UiFrame("GB7WOD", "BEACON", "hi"u8.ToArray()));
 
@@ -266,6 +266,71 @@ public class RadioSignalTests : IDisposable
             lines[0].Should().MatchRegex(@"^RSSI [0-9.]+ reads/s, [0-9.]+ ms average, [0-9]+ ms worst, 0 failed, noise floor -120\.0 dBm$");
         }
         m.NoiseFloorDbm.Should().Be(-120);
+    }
+
+    [Fact]
+    public void RadioReportingLate_StillGetsTheFramesReadings()
+    {
+        // GB7RDG's 70cm radio at 9600 baud: the NinoTNC delivers a short RR before the radio
+        // reports its carrier, and the raised readings land just after delivery
+        Idle(T0, TimeSpan.FromSeconds(5), -126);
+        var delivered = T0.AddSeconds(5);
+        monitor.Record(delivered.AddMilliseconds(-31), -126);
+        radio.Busy = true;
+        monitor.OnCarrierSense(true, delivered.AddMilliseconds(5));
+        monitor.Record(delivered.AddMilliseconds(17), -113);
+        monitor.Record(delivered.AddMilliseconds(45), -114);
+        radio.Busy = false;
+        monitor.OnCarrierSense(false, delivered.AddMilliseconds(50));
+        monitor.Record(delivered.AddMilliseconds(67), -125);
+
+        var meta = monitor.Attribute(delivered, 15, 9600);
+
+        meta!.SampleCount.Should().Be(2);
+        meta.RssiDbm.Should().Be(-113);
+        meta.SnrDb.Should().BeApproximately(13, 0.5f);
+    }
+
+    [Fact]
+    public void NextStationKeyingWellAfter_IsNotTheFrames()
+    {
+        Idle(T0, TimeSpan.FromSeconds(5), -126);
+        var delivered = T0.AddSeconds(5);
+        // Nothing on air for this frame; another station keys 300 ms later, strongly
+        radio.Busy = true;
+        monitor.OnCarrierSense(true, delivered.AddMilliseconds(300));
+        monitor.Record(delivered.AddMilliseconds(310), -80);
+
+        monitor.Attribute(delivered, 15, 9600)?.RssiDbm.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task DelayedAttribution_StoresTheFrameLaterWithItsSignal_ButTracksItAtOnce()
+    {
+        using var store = new FrameStore(null, NullLogger.Instance, flushInterval: TimeSpan.Zero);
+        var links = new LinkMonitor(store, "GB7RDG", TimeSpan.Zero, attributionDelay: TimeSpan.FromMilliseconds(100));
+        var sabm = new List<byte>();
+        var d = KissFrameBuilder.EncodeCallsign("GB7RDG", false); d[6] |= 0x80;
+        sabm.AddRange(d);
+        sabm.AddRange(KissFrameBuilder.EncodeCallsign("GB7BSK", true));
+        sabm.Add(0x3F);
+        int calls = 0;
+
+        links.Record("70cm", false, KissFrameBuilder.BuildKissDataFrame([.. sabm]), T0, _ => { calls++; return new RadioMetadata(-113, 13, -126, 2); });
+
+        links.LiveLinks.Should().ContainSingle(l => l.Remote == "GB7BSK" && l.State == LinkStates.Connecting);
+        store.QueryFrames(T0, T0.AddMinutes(1), null, null, null, 0, 10, out var before);
+        before.Should().Be(0);
+        calls.Should().Be(0);
+
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        int total = 0;
+        while (DateTime.UtcNow < deadline && total == 0)
+        {
+            await Task.Delay(20);
+            store.QueryFrames(T0, T0.AddMinutes(1), null, null, null, 0, 10, out total);
+        }
+        store.QueryFrames(T0, T0.AddMinutes(1), null, null, null, 0, 10, out _).Single().Snr.Should().Be(13);
     }
 
     private sealed class FakeRadio : IRadioControl
