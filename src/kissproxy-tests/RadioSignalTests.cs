@@ -411,12 +411,14 @@ public class RadioSignalTests : IDisposable
             LateFrame(delivered, 20 + i * 3, -113); // lags 20..53 ms
             monitor.Attribute(delivered, 15, 9600);
         }
-        monitor.LagSummary().Should().Contain("look-ahead 80 ms"); // p90 of 20..53 is 50, plus 30
+        // 15 bytes at 9600 is 15 ms on air, so the lags from frame start are 35..68 ms:
+        // p90 is 65, plus 30
+        monitor.LagSummary().Should().Contain("look-ahead 95 ms");
 
-        // A slow-mode frame on the same radio now gets the look-ahead too
-        var slow = T0.AddSeconds(40);
-        LateFrame(slow, 60, -110);
-        monitor.Attribute(slow, 15, 1200)!.RssiDbm.Should().Be(-110);
+        // A longer frame on the same radio, reported just as late, isn't rejected for its airtime
+        var longer = T0.AddSeconds(40);
+        LateFrame(longer, 40, -110);
+        monitor.Attribute(longer, 128, 9600)!.RssiDbm.Should().Be(-110);
     }
 
     [Fact]

@@ -47,7 +47,8 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     private const int FastModeBitRate = 4800;
 
     // Each radio's lag is measured as it runs: for frames with just one carrier window anywhere
-    // near them, how long after delivery the radio reported the carrier rising. The look-ahead
+    // near them, how long after the frame started on air (delivery less airtime) the radio
+    // reported the carrier rising. The look-ahead
     // is then the 90th percentile of the last MaxLagSamples, plus a margin, for every mode; a
     // radio that reports before delivery gets none. GB7RDG's TM8110 reports 18-36 ms before
     // delivery, its 70cm radio up to 52 ms after.
@@ -312,7 +313,9 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
         if (near.Count != 1)
             return;
 
-        riseLagsMs.Enqueue((near[0].RiseAt - receivedAt).TotalMilliseconds);
+        // Measured from the frame's start on air (delivery less airtime), the same reference
+        // FindWindowFast applies the look-ahead to
+        riseLagsMs.Enqueue((near[0].RiseAt - (receivedAt - airtime)).TotalMilliseconds);
         while (riseLagsMs.Count > MaxLagSamples)
             riseLagsMs.Dequeue();
     }
@@ -340,7 +343,7 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             var sorted = riseLagsMs.OrderBy(x => x).ToList();
             var median = sorted[sorted.Count / 2];
             var learned = LearnedLookAhead();
-            return $"carrier rise reported {median:+0;-0;0} ms from delivery (median of {sorted.Count}), "
+            return $"carrier rise reported {median:+0;-0;0} ms from frame start (median of {sorted.Count}), "
                 + (learned is { } l ? $"look-ahead {l.TotalMilliseconds:F0} ms" : $"look-ahead not yet learned (needs {MinLagSamples})");
         }
     }
