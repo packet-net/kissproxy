@@ -4,13 +4,15 @@ namespace kissproxylib;
 /// Takes every frame from every modem, works out which link it belongs to, feeds the link
 /// tracker and stores frame and events. Shared by all the modems' proxies.
 /// </summary>
-public sealed class LinkMonitor
+public sealed class LinkMonitor : IDisposable
 {
     private readonly FrameStore store;
     private readonly LinkTracker tracker = new();
     private readonly object sync = new();
+    private readonly Timer? sweepTimer;
 
-    public LinkMonitor(FrameStore store, string? myCallsign)
+    /// <param name="sweepInterval">How often to close links that have simply stopped; zero for never (tests).</param>
+    public LinkMonitor(FrameStore store, string? myCallsign, TimeSpan? sweepInterval = null)
     {
         this.store = store;
         tracker.MyCallsign = myCallsign;
@@ -18,15 +20,33 @@ public sealed class LinkMonitor
         foreach (var call in store.LoadLocalCalls())
             tracker.AddLocalCall(call);
 
-        // Carry link state over a restart, with when each link last carried a frame (so a
-        // link still busy isn't taken for one gone quiet)
-        var lastFrames = store.LastFrameTimes();
+        // Carry open links over a restart, with when each last carried a frame (so a link
+        // still busy isn't taken for one gone quiet)
         foreach (var e in store.LastStatesBefore(DateTime.UtcNow))
         {
-            var last = lastFrames.TryGetValue((e.Modem, e.Local, e.Remote), out var t) && t > e.Timestamp ? t : e.Timestamp;
-            tracker.Seed(e.Modem, e.Local, e.Remote, e.State!, last);
+            if (e.State == LinkStates.Disconnected)
+                continue;
+            var t = store.LastFrameTime(e.Modem, e.Local, e.Remote);
+            tracker.Seed(e.Modem, e.Local, e.Remote, e.State!, t is { } last && last > e.Timestamp ? last : e.Timestamp);
+        }
+
+        var interval = sweepInterval ?? TimeSpan.FromMinutes(1);
+        if (interval > TimeSpan.Zero)
+            sweepTimer = new Timer(_ => Sweep(DateTime.UtcNow), null, interval, interval);
+    }
+
+    /// <summary>Closes links that have gone quiet, or whose connect or disconnect was never answered.</summary>
+    public void Sweep(DateTime now)
+    {
+        lock (sync)
+        {
+            var events = tracker.Sweep(now);
+            if (events.Count > 0)
+                store.AddEvents(events);
         }
     }
+
+    public void Dispose() => sweepTimer?.Dispose();
 
     public FrameStore Store => store;
 

@@ -420,15 +420,15 @@ public static class WebApi
         });
     }
 
-    // A window within the store's retention: default the last 24 h, at least a minute
+    // A window within the store's retention: default the last 24 h, at least a second
     private static (DateTime from, DateTime to) Window(long? from, long? to, DateTime now)
     {
         var end = to is { } t ? FrameStore.FromMs(t) : now;
         var start = from is { } f ? FrameStore.FromMs(f) : end - TimeSpan.FromHours(24);
         if (start < end - FrameStore.DefaultRetention)
             start = end - FrameStore.DefaultRetention;
-        if (end - start < TimeSpan.FromMinutes(1))
-            start = end - TimeSpan.FromMinutes(1);
+        if (end - start < TimeSpan.FromSeconds(1))
+            start = end - TimeSpan.FromSeconds(1);
         return (start, end);
     }
 

@@ -64,7 +64,8 @@ public sealed class FrameStore : IDisposable
                         src TEXT NOT NULL, dest TEXT NOT NULL, path TEXT NOT NULL, type TEXT NOT NULL, cr TEXT,
                         pf INTEGER NOT NULL, ns INTEGER, nr INTEGER, pid INTEGER, info_len INTEGER NOT NULL,
                         summary TEXT NOT NULL, raw BLOB NOT NULL, local TEXT, remote TEXT NOT NULL, snr REAL);
-                    CREATE INDEX IF NOT EXISTS frames_ts ON frames(ts);
+                    DROP INDEX IF EXISTS frames_ts;
+                    CREATE INDEX IF NOT EXISTS frames_activity ON frames(ts, modem, local, remote, tx);
                     CREATE INDEX IF NOT EXISTS frames_link ON frames(modem, remote, ts);
                     CREATE TABLE IF NOT EXISTS events (
                         ts INTEGER NOT NULL, modem TEXT NOT NULL, local TEXT NOT NULL, remote TEXT NOT NULL,
@@ -92,8 +93,24 @@ public sealed class FrameStore : IDisposable
         {
             pendingFrames.Add(frame);
             pendingEvents.AddRange(events);
+
+            // If the disk stops taking writes (an SD card gone read-only, say) don't grow forever
+            if (pendingFrames.Count > MaxPendingFrames)
+            {
+                pendingFrames.RemoveRange(0, MaxPendingFrames / 10);
+                if (!warnedDropping)
+                {
+                    logger.LogWarning("Frame history can't be written; dropping the oldest unwritten frames");
+                    warnedDropping = true;
+                }
+            }
         }
     }
+
+    // About two days of GB7RDG's traffic
+    private const int MaxPendingFrames = 100_000;
+    private bool warnedDropping;
+    private readonly object flushLock = new();
 
     public void AddLocalCall(string call)
     {
@@ -104,72 +121,93 @@ public sealed class FrameStore : IDisposable
     /// <summary>Writes pending records to disk (or trims memory) and drops anything past retention.</summary>
     public void Flush()
     {
-        List<string> locals;
-        lock (pendingLock)
+        // One flush at a time (the timer's and Dispose's), and the batch moves from in-flight to
+        // written under the database lock, so a query sees each record exactly once
+        lock (flushLock)
         {
-            inFlightFrames = pendingFrames;
-            inFlightEvents = pendingEvents;
-            pendingFrames = [];
-            pendingEvents = [];
-            locals = [.. pendingLocalCalls];
-            pendingLocalCalls.Clear();
-        }
-
-        try
-        {
-            if (db == null)
+            List<string> locals;
+            lock (pendingLock)
             {
-                var cutoff = clock() - MemoryOnlyRetention;
-                lock (pendingLock)
-                {
-                    memoryFrames.AddRange(inFlightFrames);
-                    memoryEvents.AddRange(inFlightEvents);
-                    memoryFrames.RemoveAll(f => f.Timestamp < cutoff);
-                    memoryEvents.RemoveAll(e => e.Timestamp < cutoff);
-                }
-                return;
+                inFlightFrames = pendingFrames;
+                inFlightEvents = pendingEvents;
+                pendingFrames = [];
+                pendingEvents = [];
+                locals = [.. pendingLocalCalls];
+                pendingLocalCalls.Clear();
             }
 
             lock (dbLock)
             {
-                using var tx = db.BeginTransaction();
-                WriteFrames(tx, inFlightFrames);
-                WriteEvents(tx, inFlightEvents);
-                foreach (var call in locals)
-                    Execute("INSERT OR IGNORE INTO local_calls(call) VALUES ($c)", tx, ("$c", call));
-
-                var now = clock();
-                if (now - lastPrune > TimeSpan.FromHours(1))
+                try
                 {
-                    var cutoff = ToMs(now - retention);
-                    Execute("DELETE FROM frames WHERE ts < $c", tx, ("$c", cutoff));
-                    Execute("DELETE FROM events WHERE ts < $c", tx, ("$c", cutoff));
-                    lastPrune = now;
+                    if (db == null)
+                    {
+                        var cutoff = clock() - MemoryOnlyRetention;
+                        lock (pendingLock)
+                        {
+                            memoryFrames.AddRange(inFlightFrames);
+                            memoryEvents.AddRange(inFlightEvents);
+                            memoryFrames.RemoveAll(f => f.Timestamp < cutoff);
+                            var keep = LatestStates(memoryEvents);
+                            memoryEvents.RemoveAll(e => e.Timestamp < cutoff && !keep.Contains(e));
+                        }
+                    }
+                    else
+                    {
+                        using var tx = db.BeginTransaction();
+                        WriteFrames(tx, inFlightFrames);
+                        WriteEvents(tx, inFlightEvents);
+                        foreach (var call in locals)
+                            Execute("INSERT OR IGNORE INTO local_calls(call) VALUES ($c)", tx, ("$c", call));
+
+                        var now = clock();
+                        if (now - lastPrune > TimeSpan.FromHours(1))
+                        {
+                            var cutoff = ToMs(now - retention);
+                            Execute("DELETE FROM frames WHERE ts < $c", tx, ("$c", cutoff));
+                            // Keep every link's latest state, or a link up for over a week loses its bar
+                            Execute("""
+                                DELETE FROM events WHERE ts < $c AND rowid NOT IN (
+                                    SELECT e.rowid FROM events e
+                                    JOIN (SELECT modem, local, remote, max(ts) AS ts FROM events
+                                          WHERE kind = 'state' GROUP BY modem, local, remote) last
+                                    ON e.modem = last.modem AND e.local = last.local AND e.remote = last.remote AND e.ts = last.ts
+                                    WHERE e.kind = 'state')
+                                """, tx, ("$c", cutoff));
+                            lastPrune = now;
+                        }
+                        tx.Commit();
+                    }
+
+                    lock (pendingLock)
+                    {
+                        inFlightFrames = [];
+                        inFlightEvents = [];
+                    }
                 }
-                tx.Commit();
-            }
-        }
-        catch
-        {
-            // Keep the records for the next attempt rather than losing them
-            lock (pendingLock)
-            {
-                pendingFrames.InsertRange(0, inFlightFrames);
-                pendingEvents.InsertRange(0, inFlightEvents);
-                foreach (var call in locals)
-                    pendingLocalCalls.Add(call);
-            }
-            throw;
-        }
-        finally
-        {
-            lock (pendingLock)
-            {
-                inFlightFrames = [];
-                inFlightEvents = [];
+                catch
+                {
+                    // Keep the records for the next attempt rather than losing them
+                    lock (pendingLock)
+                    {
+                        pendingFrames.InsertRange(0, inFlightFrames);
+                        pendingEvents.InsertRange(0, inFlightEvents);
+                        inFlightFrames = [];
+                        inFlightEvents = [];
+                        foreach (var call in locals)
+                            pendingLocalCalls.Add(call);
+                    }
+                    throw;
+                }
             }
         }
     }
+
+    private static HashSet<LinkEvent> LatestStates(IEnumerable<LinkEvent> events) =>
+        events.Where(e => e.Kind == "state")
+            .GroupBy(e => (e.Modem, e.Local, e.Remote))
+            .Select(g => g.MaxBy(e => e.Timestamp)!)
+            .ToHashSet();
 
     private void FlushSafely()
     {
@@ -187,37 +225,38 @@ public sealed class FrameStore : IDisposable
             && (remote == null || f.Remote == remote)
             && (local == null || (local == "" ? f.Local == null : f.Local == local));
 
-        var unwritten = Unwritten(f => Match(f));
-        var result = new List<FrameRecord>();
-        total = unwritten.Count;
-
-        if (db != null)
+        // Under the database lock, so a batch being flushed is seen once, not twice or never
+        lock (dbLock)
         {
-            var (where, args) = FrameFilter(from, to, modem, local, remote);
-            lock (dbLock)
+            var unwritten = Unwritten(f => Match(f));
+            var result = new List<FrameRecord>();
+            total = unwritten.Count;
+
+            if (db != null)
             {
+                var (where, args) = FrameFilter(from, to, modem, local, remote);
                 total += Convert.ToInt32(Scalar($"SELECT count(*) FROM frames WHERE {where}", args));
                 result.AddRange(ReadFrames($"SELECT * FROM frames WHERE {where} ORDER BY ts LIMIT $limit OFFSET $offset",
                     [.. args, ("$limit", offset + limit), ("$offset", 0)]));
             }
-        }
 
-        // Unwritten frames are always newer than written ones
-        result.AddRange(unwritten);
-        return result.Skip(offset).Take(limit).ToList();
+            // Unwritten frames are always newer than written ones
+            result.AddRange(unwritten);
+            return result.Skip(offset).Take(limit).ToList();
+        }
     }
 
     /// <summary>Link events in [from, to), oldest first.</summary>
     public IReadOnlyList<LinkEvent> QueryEvents(DateTime from, DateTime to)
     {
         var result = new List<LinkEvent>();
-        if (db != null)
+        lock (dbLock)
         {
-            lock (dbLock)
+            if (db != null)
                 result.AddRange(ReadEvents("SELECT * FROM events WHERE ts >= $from AND ts < $to",
                     [("$from", ToMs(from)), ("$to", ToMs(to))]));
+            result.AddRange(UnwrittenEvents(e => e.Timestamp >= from && e.Timestamp < to));
         }
-        result.AddRange(UnwrittenEvents(e => e.Timestamp >= from && e.Timestamp < to));
         return result.OrderBy(e => e.Timestamp).ToList();
     }
 
@@ -225,9 +264,9 @@ public sealed class FrameStore : IDisposable
     public IReadOnlyList<LinkEvent> LastStatesBefore(DateTime before)
     {
         var all = new List<LinkEvent>();
-        if (db != null)
+        lock (dbLock)
         {
-            lock (dbLock)
+            if (db != null)
                 all.AddRange(ReadEvents("""
                     SELECT e.* FROM events e
                     JOIN (SELECT modem, local, remote, max(ts) AS ts FROM events
@@ -235,8 +274,8 @@ public sealed class FrameStore : IDisposable
                     ON e.modem = last.modem AND e.local = last.local AND e.remote = last.remote AND e.ts = last.ts
                     WHERE e.kind = 'state'
                     """, [("$before", ToMs(before))]));
+            all.AddRange(UnwrittenEvents(e => e.Kind == "state" && e.Timestamp < before));
         }
-        all.AddRange(UnwrittenEvents(e => e.Kind == "state" && e.Timestamp < before));
 
         return all
             .GroupBy(e => (e.Modem, e.Local, e.Remote))
@@ -256,9 +295,10 @@ public sealed class FrameStore : IDisposable
             counts[(modem, local, remote, b)] = (c.rx + rx, c.tx + tx);
         }
 
-        if (db != null)
+        // One lock for both, so a batch being flushed is counted once
+        lock (dbLock)
         {
-            lock (dbLock)
+            if (db != null)
             {
                 using var cmd = db.CreateCommand();
                 cmd.CommandText = """
@@ -272,10 +312,10 @@ public sealed class FrameStore : IDisposable
                 while (r.Read())
                     Count(r.GetString(0), r.IsDBNull(1) ? null : r.GetString(1), r.GetString(2), r.GetInt64(3), r.GetInt32(4), r.GetInt32(5));
             }
-        }
 
-        foreach (var f in Unwritten(f => f.Timestamp >= from && f.Timestamp < to))
-            Count(f.Modem, f.Local, f.Remote, (ToMs(f.Timestamp) - ToMs(from)) / bucketMs, f.Transmitted ? 0 : 1, f.Transmitted ? 1 : 0);
+            foreach (var f in Unwritten(f => f.Timestamp >= from && f.Timestamp < to))
+                Count(f.Modem, f.Local, f.Remote, (ToMs(f.Timestamp) - ToMs(from)) / bucketMs, f.Transmitted ? 0 : 1, f.Transmitted ? 1 : 0);
+        }
 
         return counts
             .Select(kv => new ActivityBucket(kv.Key.Item1, kv.Key.Item2, kv.Key.Item3,
@@ -284,30 +324,29 @@ public sealed class FrameStore : IDisposable
             .ToList();
     }
 
-    /// <summary>When each link (not heard-only stations) last carried a frame.</summary>
-    public IReadOnlyDictionary<(string Modem, string Local, string Remote), DateTime> LastFrameTimes()
+    /// <summary>When a link last carried a frame, if within retention.</summary>
+    public DateTime? LastFrameTime(string modem, string local, string remote)
     {
-        var result = new Dictionary<(string, string, string), DateTime>();
-        void Note(string modem, string local, string remote, DateTime t)
+        lock (dbLock)
         {
-            if (!result.TryGetValue((modem, local, remote), out var seen) || t > seen)
-                result[(modem, local, remote)] = t;
-        }
+            var unwritten = Unwritten(f => f.Modem == modem && f.Local == local && f.Remote == remote);
+            if (unwritten.Count > 0)
+                return unwritten[^1].Timestamp;
+            if (db == null)
+                return null;
 
-        if (db != null)
-        {
-            lock (dbLock)
-            {
-                using var cmd = db.CreateCommand();
-                cmd.CommandText = "SELECT modem, local, remote, max(ts) FROM frames WHERE local IS NOT NULL GROUP BY modem, local, remote";
-                using var r = cmd.ExecuteReader();
-                while (r.Read())
-                    Note(r.GetString(0), r.GetString(1), r.GetString(2), FromMs(r.GetInt64(3)));
-            }
+            // Uses the (modem, remote, ts) index
+            var ms = Scalar("SELECT max(ts) FROM frames WHERE modem = $m AND remote = $r AND local = $l",
+                [("$m", modem), ("$r", remote), ("$l", local)]);
+            return ms is long v ? FromMs(v) : null;
         }
-        foreach (var f in Unwritten(f => f.Local != null))
-            Note(f.Modem, f.Local!, f.Remote, f.Timestamp);
-        return result;
+    }
+
+    /// <summary>Link events with no frame of their own (from the periodic sweep).</summary>
+    public void AddEvents(IReadOnlyList<LinkEvent> events)
+    {
+        lock (pendingLock)
+            pendingEvents.AddRange(events);
     }
 
     /// <summary>Callsigns learned as ours in earlier runs.</summary>

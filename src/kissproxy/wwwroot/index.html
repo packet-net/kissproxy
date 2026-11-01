@@ -1825,17 +1825,21 @@
             if (name === 'links') {
                 initLinksView();
                 loadTimeline();
-                tl.timer = setInterval(() => { if (tl.day === 0 && !tl.zoom) loadTimeline(); }, 30000);
+                // No refresh mid-drag: it would redraw the timeline out from under the pointer
+                tl.timer = setInterval(() => { if (tl.day === 0 && !tl.zoom && !tl.drag) loadTimeline(); }, 30000);
             }
         }
 
         function initLinksView() {
             const day = document.getElementById('links-day');
-            if (!day.options.length) {
+            const today = new Date().toISOString().slice(0, 10);
+            if (day.dataset.built !== today) {
+                day.dataset.built = today;
                 day.innerHTML = '<option value="0">Last 24 hours</option>' + [1, 2, 3, 4, 5, 6].map(d => {
                     const start = new Date(Date.now() - d * DAY_MS);
                     return `<option value="${d}">${start.toISOString().slice(0, 10)} (UTC day)</option>`;
                 }).join('');
+                day.value = String(tl.day);
             }
             document.getElementById('links-legend').innerHTML =
                 Object.entries(LINK_FILL).map(([k, c]) => `<span><i class="legend-swatch" style="background:${c}"></i>${k}</span>`).join('') +
@@ -1869,6 +1873,7 @@
         }
 
         async function loadTimeline() {
+            initLinksView(); // the day list moves on at midnight UTC
             const { from, to } = timelineRange();
             const live = tl.day === 0 && !tl.zoom;
             try {
@@ -1930,6 +1935,8 @@
             const plotW = width - TL.label - TL.right;
             const x = t => TL.label + (t - d.from) / (d.to - d.from) * plotW;
             const items = timelineRows();
+            d.maxCount = 1;
+            for (const rr of d.rows) for (const a of rr.activity) d.maxCount = Math.max(d.maxCount, a.rx + a.tx);
             let y = TL.axis + TL.track;
             const parts = [];
             const multiDay = d.to - d.from > DAY_MS / 2 && new Date(d.from).getUTCDate() !== new Date(d.to).getUTCDate();
@@ -1990,7 +1997,7 @@
                 `<title>Show only frames for ${esc(r.remote)}${esc(via)} on ${esc(r.modem)}</title></g>`);
 
             // Frame activity, faint, along the bottom of the row
-            const maxCount = Math.max(1, ...d.rows.flatMap(rr => rr.activity.map(a => a.rx + a.tx)));
+            const maxCount = d.maxCount;
             const bw = Math.max(1, (x(d.from + d.bucketMs) - x(d.from)));
             for (const a of r.activity) {
                 const n = a.rx + a.tx;
@@ -2085,8 +2092,9 @@
                 tl.page = 0;
                 loadFrames();
             };
-            svg.addEventListener('pointerup', end);
-            svg.addEventListener('pointercancel', end);
+            // On window, so letting go outside the timeline still ends the drag
+            window.onpointerup = end;
+            window.onpointercancel = end;
         }
 
         function showFramesHeader(total) {
