@@ -22,7 +22,7 @@ kissproxylib is a .NET library version which can be used to integrate a KISS pro
 
 ### KISS Parameter Control
 - **Filter commands from node**: block TxDelay, Persistence, SlotTime, TxTail, FullDuplex, or SetHardware commands
-- **Override parameter values**: send your own values to the modem instead of (or in addition to) what the node sends
+- **Override parameter values**: send your own value to the modem instead of the node's; a value is only sent while its filter is on
 - **Periodic parameter refresh**: optionally resend parameters at configurable intervals
 
 ### NinoTNC Support
@@ -79,11 +79,11 @@ All options are configurable via the web UI:
 | `filterTxTail` | Block TxTail commands from node | false |
 | `filterFullDuplex` | Block FullDuplex commands from node | false |
 | `filterSetHardware` | Block SetHardware commands from node | false |
-| `txDelayValue` | Override TxDelay value (10ms units) | null |
-| `persistenceValue` | Override Persistence value (0-255) | null |
-| `slotTimeValue` | Override SlotTime value (10ms units) | null |
-| `txTailValue` | Override TxTail value (10ms units) | null |
-| `fullDuplexValue` | Override FullDuplex (true/false) | null |
+| `txDelayValue` | Override TxDelay in ms (sent only while `filterTxDelay` is on) | null |
+| `persistenceValue` | Override Persistence, 0-255 (sent only while `filterPersistence` is on) | null |
+| `slotTimeValue` | Override SlotTime in ms (sent only while `filterSlotTime` is on) | null |
+| `txTailValue` | Override TxTail in ms (sent only while `filterTxTail` is on) | null |
+| `fullDuplexValue` | Override FullDuplex, true/false (sent only while `filterFullDuplex` is on; not in the web UI) | null |
 | `ninoMode` | NinoTNC mode to set (0-14) | null |
 | `persistNinoMode` | Save mode to TNC flash memory | false |
 | `parameterSendInterval` | Resend parameters every N seconds (0=on connect only) | 0 |

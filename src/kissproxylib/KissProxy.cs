@@ -407,7 +407,7 @@ public class KissProxy
             if (modemState != null)
                 modemState.SetConnectionState(nodeConnected: true);
 
-            var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
             // Run node-to-modem (reads from TCP, writes to serial)
             Task nodeToModem = Task.Run(() => RunNodeToModem(tcpStream, serialPort, emitAsBase64String, cts, serialCts));
@@ -430,10 +430,16 @@ public class KissProxy
             try { tcpStream.Socket.Shutdown(SocketShutdown.Both); }
             catch { }
 
+            // Let the node thread finish before its token sources are disposed
+            await Task.WhenAny(nodeToModem, Task.Delay(TimeSpan.FromSeconds(5), CancellationToken.None));
+
             if (modemState != null)
                 modemState.SetConnectionState(nodeConnected: false);
 
-            logger.LogInformation("Node disconnected, serial port remains open");
+            if (cancellationToken.IsCancellationRequested)
+                logger.LogInformation("Node session ended");
+            else
+                logger.LogInformation("Node disconnected, serial port remains open");
         }
     }
 

@@ -17,8 +17,9 @@ public interface ISerialPort : IDisposable
 public class RealSerialPort(string port, int baud) : ISerialPort
 {
     // A TNC that stops draining must fail the write (and so reopen the port), not hang
-    // every writer behind the serial write lock
-    private readonly SerialPort serialPort = new(port, baud) { WriteTimeout = 2000 };
+    // every writer behind the serial write lock. Generous, since a TNC that holds off USB
+    // while its buffer is full can take several seconds per frame at 300 baud
+    private readonly SerialPort serialPort = new(port, baud) { WriteTimeout = 30000 };
     public void Close() => serialPort.Close();
     public void Open() => serialPort.Open();
     public int Read(byte[] buffer, int offset, int count) => serialPort.Read(buffer, offset, count);
