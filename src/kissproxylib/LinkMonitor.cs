@@ -10,11 +10,21 @@ public sealed class LinkMonitor : IDisposable
     private readonly LinkTracker tracker = new();
     private readonly object sync = new();
     private readonly Timer? sweepTimer;
+    private readonly TimeSpan attributionDelay;
+
+    /// <summary>
+    /// How long a received frame waits for its radio readings: the radio may report the frame's
+    /// carrier, and its readings may land, after the modem has delivered it
+    /// (<see cref="RadioSignalMonitor.LookAhead"/>).
+    /// </summary>
+    public static readonly TimeSpan DefaultAttributionDelay = TimeSpan.FromMilliseconds(250);
 
     /// <param name="sweepInterval">How often to close links that have simply stopped; zero for never (tests).</param>
-    public LinkMonitor(FrameStore store, string? myCallsign, TimeSpan? sweepInterval = null)
+    /// <param name="attributionDelay">How long a received frame waits for radio readings; zero to attribute at once (tests).</param>
+    public LinkMonitor(FrameStore store, string? myCallsign, TimeSpan? sweepInterval = null, TimeSpan? attributionDelay = null)
     {
         this.store = store;
+        this.attributionDelay = attributionDelay ?? DefaultAttributionDelay;
         tracker.MyCallsign = myCallsign;
 
         foreach (var call in store.LoadLocalCalls())
@@ -46,7 +56,14 @@ public sealed class LinkMonitor : IDisposable
         }
     }
 
-    public void Dispose() => sweepTimer?.Dispose();
+    /// <summary>Stops the sweep, and gives frames still waiting for radio readings time to be stored.</summary>
+    public void Dispose()
+    {
+        sweepTimer?.Dispose();
+        var deadline = DateTime.UtcNow + attributionDelay + TimeSpan.FromSeconds(1);
+        while (Volatile.Read(ref waiting) > 0 && DateTime.UtcNow < deadline)
+            Thread.Sleep(20);
+    }
 
     public FrameStore Store => store;
 
@@ -70,8 +87,10 @@ public sealed class LinkMonitor : IDisposable
 
         var summary = Ax25Decoder.Describe(data.Ax25);
         var t = timestamp ?? DateTime.UtcNow;
-        var signal = transmitted ? null : radio?.Invoke(data.Ax25.Length);
+        bool attributeLater = !transmitted && radio != null && attributionDelay > TimeSpan.Zero;
 
+        FrameRecord frame;
+        List<LinkEvent> events;
         lock (sync)
         {
             int knownLocals = tracker.LocalCalls.Count;
@@ -79,14 +98,40 @@ public sealed class LinkMonitor : IDisposable
             if (tracker.LocalCalls.Count != knownLocals)
                 store.AddLocalCall(fields.Source);
 
-            var frame = new FrameRecord(t, modem, transmitted, data.Port, fields.Source, fields.Dest,
+            frame = new FrameRecord(t, modem, transmitted, data.Port, fields.Source, fields.Dest,
                 string.Join(",", fields.Digis), fields.Type, fields.CommandResponse, fields.PollFinal,
-                fields.Ns, fields.Nr, fields.Pid, fields.InfoLength, summary, data.Ax25, local, remote,
-                signal?.SnrDb, signal?.RssiDbm, signal?.NoiseFloorDbm);
+                fields.Ns, fields.Nr, fields.Pid, fields.InfoLength, summary, data.Ax25, local, remote);
 
-            store.Add(frame, tracker.Observe(frame));
+            // Link tracking sees the frame now; only its signal readings may wait
+            events = tracker.Observe(frame);
+            if (!attributeLater)
+            {
+                var signal = transmitted ? null : radio?.Invoke(data.Ax25.Length);
+                store.Add(frame with { Snr = signal?.SnrDb, Rssi = signal?.RssiDbm, NoiseFloor = signal?.NoiseFloorDbm }, events);
+                return;
+            }
+            store.AddEvents(events);
         }
+
+        int length = data.Ax25.Length;
+        Interlocked.Increment(ref waiting);
+        _ = Task.Delay(attributionDelay).ContinueWith(_ =>
+        {
+            try
+            {
+                RadioMetadata? signal = null;
+                try { signal = radio!(length); } catch { }
+                store.Add(frame with { Snr = signal?.SnrDb, Rssi = signal?.RssiDbm, NoiseFloor = signal?.NoiseFloorDbm }, []);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref waiting);
+            }
+        }, TaskScheduler.Default);
     }
+
+    // Received frames still waiting for their radio readings
+    private int waiting;
 
     /// <summary>Every link's live state, with when it last saw a frame.</summary>
     public IReadOnlyList<(string Modem, string Local, string Remote, string State, DateTime LastFrame)> LiveLinks

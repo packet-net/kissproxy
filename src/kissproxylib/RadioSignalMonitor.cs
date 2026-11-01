@@ -34,6 +34,16 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     // Samples kept for attribution; comfortably longer than any frame plus TXDELAY
     private static readonly TimeSpan SampleHorizon = TimeSpan.FromSeconds(10);
 
+    // How long after a frame's delivery its carrier and readings may still turn up. A fast modem
+    // can hand over a short frame before a slower radio reports its carrier: on GB7RDG's 70cm
+    // Tait at 9600 baud, carrier rises were reported up to 52 ms and raised readings landed up
+    // to 45 ms after the NinoTNC delivered the frame. Callers attribute at least this long after
+    // delivery (LinkMonitor waits 250 ms) so those readings exist.
+    public static readonly TimeSpan LookAhead = TimeSpan.FromMilliseconds(100);
+
+    // Modes at least this fast get the look-ahead (GB7RDG: 70cm is 9600, 2m 3600)
+    private const int FastModeBitRate = 4800;
+
     // How long past carrier-fall a delivered frame can still belong to that window: the
     // modem's decode and serial delivery (measured 34-115 ms at 1200 baud)
     private static readonly TimeSpan WindowAttributionSlack = TimeSpan.FromMilliseconds(500);
@@ -113,9 +123,14 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
         {
             float? floor = noiseFloorDbm is { } nf ? (float)nf : null;
 
-            if (radio.Capabilities.HasFlag(RadioCapabilities.CarrierSense) && FindWindow(receivedAt, airtime) is { } window)
+            // The late-radio look-ahead only for fast modes, where a frame can be shorter than the
+            // radio's reporting lag; slow modes and unknown rates keep the original rule
+            bool fast = bitRateHz >= FastModeBitRate && airtime != null;
+            var latest = fast ? receivedAt + LookAhead : receivedAt;
+            var found = fast ? FindWindowFast(receivedAt, airtime!.Value) : FindWindow(receivedAt, airtime);
+            if (radio.Capabilities.HasFlag(RadioCapabilities.CarrierSense) && found is { } window)
             {
-                var to = window.FallAt is { } fall && fall < receivedAt ? fall : receivedAt;
+                var to = window.FallAt is { } fall && fall < latest ? fall : latest;
                 var stats = Statistics(samples.Where(s => s.At >= window.RiseAt && s.At <= to).Select(s => s.Dbm));
                 if (stats is { } st)
                     return new RadioMetadata(st.Median, floor is { } f ? st.Median - f : null, floor, st.Count);
@@ -126,7 +141,7 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             // No carrier sense, or the window was missed: samples above the floor count as signal
             var from = receivedAt - AttributionLookback;
             var signal = samples
-                .Where(s => s.At >= from && s.At <= receivedAt && (floor == null || s.Dbm >= floor + SignalThresholdDb))
+                .Where(s => s.At >= from && s.At <= latest && (floor == null || s.Dbm >= floor + SignalThresholdDb))
                 .Select(s => s.Dbm);
             return Statistics(signal) is { } t
                 ? new RadioMetadata(t.Median, floor is { } f2 ? t.Median - f2 : null, floor, t.Count)
@@ -215,9 +230,40 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     /// <summary>Our own transmitter keyed or released (from the radio's progress reports).</summary>
     public void SetTransmitting(bool keyed) => transmitting = keyed;
 
-    // The frame belongs to the window whose carrier carried it. Delivery trails carrier-fall by
-    // the modem's latency, so closed windows stay eligible for a slack, and the next station may
-    // key inside it: a window that opened after the frame was already on air can't claim it.
+    // Fast modes: the frame belongs to the window whose carrier carried it. A window is
+    // plausible if it rose no later than LookAhead after the frame started on air (its delivery
+    // less its airtime: a radio can report carrier late, but a carrier that rose well after the
+    // frame was already on air is someone else's), and fell no more than the slack before
+    // delivery. Of those, the one nearest the delivery wins: a previous station's carrier ended
+    // earlier, a late-reported one of the frame's own is close.
+    private CarrierWindow? FindWindowFast(DateTime receivedAt, TimeSpan airtime)
+    {
+        var latestRise = receivedAt - airtime + LookAhead;
+
+        CarrierWindow? best = null;
+        var bestDistance = TimeSpan.MaxValue;
+        foreach (var w in windows.Concat(currentWindow is { } c ? [c] : Array.Empty<CarrierWindow>()))
+        {
+            if (w.RiseAt > latestRise || w.FallAt is { } f && f + WindowAttributionSlack < receivedAt)
+                continue;
+
+            // Zero when the delivery falls inside the window
+            var distance = w.RiseAt > receivedAt ? w.RiseAt - receivedAt
+                : w.FallAt is { } fall && fall < receivedAt ? receivedAt - fall
+                : TimeSpan.Zero;
+            if (distance < bestDistance)
+            {
+                best = w;
+                bestDistance = distance;
+            }
+        }
+        return best;
+    }
+
+    // Slow modes and unknown rates (packet.net's rule): the frame belongs to the window whose
+    // carrier carried it. Delivery trails carrier-fall by the modem's decode and serial
+    // latency, so closed windows stay eligible for a slack, and the next station may key inside
+    // it: a window that opened after the frame was already on air can't claim it.
     private CarrierWindow? FindWindow(DateTime receivedAt, TimeSpan? airtime)
     {
         CarrierWindow? closed = null;

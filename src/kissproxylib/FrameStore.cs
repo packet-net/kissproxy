@@ -309,9 +309,11 @@ public sealed class FrameStore : IDisposable
                     [.. args, ("$limit", offset + limit), ("$offset", 0)]));
             }
 
-            // Unwritten frames are always newer than written ones
+            // Usually unwritten frames are newer than written ones, but a received frame waiting
+            // for its radio readings can be added after a later one was written: sort the
+            // database's first offset+limit with every unwritten match, then page
             result.AddRange(unwritten);
-            return result.Skip(offset).Take(limit).ToList();
+            return result.OrderBy(f => f.Timestamp).Skip(offset).Take(limit).ToList();
         }
     }
 
@@ -399,15 +401,17 @@ public sealed class FrameStore : IDisposable
         lock (dbLock)
         {
             var unwritten = Unwritten(f => f.Modem == modem && f.Local == local && f.Remote == remote);
-            if (unwritten.Count > 0)
-                return unwritten[^1].Timestamp;
+            DateTime? latest = unwritten.Count > 0 ? unwritten[^1].Timestamp : null;
             if (db == null)
-                return null;
+                return latest;
 
-            // Uses the (modem, remote, ts) index
+            // Uses the (modem, remote, ts) index. Both, since a delayed frame can be older than
+            // one already written
             var ms = Scalar("SELECT max(ts) FROM frames WHERE modem = $m AND remote = $r AND local = $l",
                 [("$m", modem), ("$r", remote), ("$l", local)]);
-            return ms is long v ? FromMs(v) : null;
+            if (ms is long v && (latest == null || FromMs(v) > latest))
+                latest = FromMs(v);
+            return latest;
         }
     }
 
