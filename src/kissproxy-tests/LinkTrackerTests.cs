@@ -409,4 +409,17 @@ public class LinkTrackerTests : IDisposable
             (LinkStates.Connecting, "GB7BSK-1"), (LinkStates.Connected, "GB7BSK-1"), (LinkStates.Disconnecting, "GB7BSK-1"),
             (LinkStates.Connecting, "GB7RDG-2"), (LinkStates.Connected, "GB7RDG-2"));
     }
+
+    [Fact]
+    public void Timeline_ReconnectOverAnUpLink_TakesTheNewOpener()
+    {
+        Tx(0, Frame("GB7RDG", "GB7WIN", true, SABM));
+        Rx(1, Frame("GB7WIN", "GB7RDG", false, UA));
+        Rx(30, Frame("GB7WIN", "GB7RDG", true, SABM));
+        Tx(31, Frame("GB7RDG", "GB7WIN", false, UA));
+
+        var now = T0.AddMinutes(2);
+        var row = TimelineBuilder.Build(monitor, T0.AddMinutes(-1), now, now).Rows.Single(r => r.Remote == "GB7WIN");
+        row.Segments.Select(s => s.Initiator).Should().Equal("GB7RDG", "GB7RDG", "GB7WIN", "GB7WIN");
+    }
 }

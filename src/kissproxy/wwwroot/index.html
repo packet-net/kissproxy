@@ -2028,7 +2028,8 @@
             // connected and in (left) when they did
             r.segments.forEach((g, i) => {
                 const prev = r.segments[i - 1];
-                const sessionStart = g.initiator && !(prev && prev.initiator === g.initiator && prev.e === g.s);
+                // Not for a session already under way when the window starts
+                const sessionStart = g.initiator && g.s > d.from && !(prev && prev.initiator === g.initiator && prev.e === g.s);
                 if (!sessionStart) return;
                 const x1 = x(g.s), out_ = g.initiator === r.local, cy = y + 14;
                 const path = out_ ? `M${x1 - 7},${cy - 5} L${x1 - 1},${cy} L${x1 - 7},${cy + 5} Z` : `M${x1 - 1},${cy - 5} L${x1 - 7},${cy} L${x1 - 1},${cy + 5} Z`;

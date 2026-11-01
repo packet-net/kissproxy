@@ -100,7 +100,8 @@ public static class TimelineBuilder
         {
             if (state != LinkStates.Disconnected && e.Timestamp > cursor)
                 segments.Add(new TimelineSegment(cursor, e.Timestamp, state, detail, false, initiator));
-            if (e.State == LinkStates.Connecting && state == LinkStates.Disconnected)
+            // A new session: from down, or a fresh connect over a link that was up
+            if (e.State == LinkStates.Connecting && state != LinkStates.Connecting)
                 initiator = Opener(e.Detail);
             else if (e.State == LinkStates.Disconnected)
                 initiator = null;
