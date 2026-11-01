@@ -1998,6 +1998,11 @@
                     `<i class="dot" style="background:${l.colour}"></i><span class="muted">${esc(r.modem)}</span> ${esc(linkName(r.local, r.remote))} <span class="muted">${esc(l.text)}</span></span>`;
             }).join('') || '<span class="muted" style="font-size:0.8rem">No connections in the selected window.</span>';
             el.querySelectorAll('.link-chip').forEach(c => c.addEventListener('click', () => toggleLinkFilter(c.dataset)));
+            // The container outlives each render, so its tooltip handler is attached once
+            if (!el.dataset.tips) {
+                el.dataset.tips = '1';
+                bindTips(el, () => null);
+            }
         }
 
         function toggleLinkFilter(ds) {
@@ -2032,7 +2037,8 @@
                     const radio = (d.radios || []).find(r => r.modem === it.modem);
                     parts.push(`<rect x="0" y="${y}" width="${TL.label}" height="${TL.group}" fill="rgba(15,52,96,0.5)"${tip(`${it.modem}: ${it.count} connection${it.count === 1 ? '' : 's'} in this window${radio ? `\nradio ${radio.status || 'not configured now'}` : '\nno radio on this port'}`)}/>` +
                         `<rect x="${TL.label}" y="${y}" width="${width - TL.label}" height="${TL.group}" fill="rgba(15,52,96,0.5)"/>`);
-                    parts.push(`<text x="10" y="${y + 16}" font-weight="bold">${esc(it.modem)}</text><text x="${10 + it.modem.length * 9 + 8}" y="${y + 16}" class="muted">${it.count} link${it.count === 1 ? '' : 's'}</text>`);
+                    // The texts let the mouse through to the heading's rect and its tooltip
+                    parts.push(`<text x="10" y="${y + 16}" font-weight="bold" pointer-events="none">${esc(it.modem)}</text><text x="${10 + it.modem.length * 9 + 8}" y="${y + 16}" class="muted" pointer-events="none">${it.count} link${it.count === 1 ? '' : 's'}</text>`);
                     parts.push(renderNoiseTrace(it.modem, y, x, 10 + it.modem.length * 9 + 8 + `${it.count} links`.length * 7 + 10));
                     y += TL.group;
                 } else if (it.kind === 'heard') {
@@ -2243,6 +2249,11 @@
         // One floating tooltip for the whole timeline: fixed text from data-tip, or worked out at
         // the pointer for the noise line, a row's empty space and the selection handles
         function attachTimelineTips(svg, toTime) {
+            bindTips(svg, toTime);
+        }
+
+        function bindTips(container, toTime) {
+            const svg = container;
             const box = document.getElementById('timeline-tip');
             const hide = () => { box.style.display = 'none'; };
             const textFor = (el, e) => {
