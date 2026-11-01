@@ -61,6 +61,9 @@ public sealed class LinkTracker
     /// <summary>A connect that gets no UA for this long has failed.</summary>
     public static readonly TimeSpan ConnectTimeout = TimeSpan.FromMinutes(3);
 
+    /// <summary>A DISC that gets no UA or DM for this long has finished anyway.</summary>
+    public static readonly TimeSpan DisconnectTimeout = TimeSpan.FromMinutes(1);
+
     // Polls closer together than this are T1 retries, not T3 keep-alives
     private static readonly TimeSpan RetryPollInterval = TimeSpan.FromSeconds(60);
 
@@ -105,16 +108,58 @@ public sealed class LinkTracker
     /// </summary>
     public (string? Local, string Remote) Classify(bool transmitted, Ax25Fields f)
     {
-        if (transmitted)
-            localCalls.Add(f.Source);
+        // A frame we send with a repeated (H bit) digi in its path is one we digipeated for
+        // others; a frame we hear with an unrepeated digi isn't at its destination yet
+        bool viaDigi = f.Digis.Any(d => !d.EndsWith('*'));
+        bool digipeated = f.Digis.Any(d => d.EndsWith('*'));
 
-        if (f.Type == "UI")
+        if (f.Type == "UI" || (transmitted && digipeated) || (!transmitted && viaDigi))
             return (null, f.Source);
 
         if (transmitted)
+        {
+            // Only connected-mode frames we originate teach us our own calls
+            localCalls.Add(f.Source);
             return (f.Source, f.Dest);
+        }
 
         return IsLocal(f.Dest) ? (f.Dest, f.Source) : (null, f.Source);
+    }
+
+    /// <summary>
+    /// Closes links whose state should have ended by now (gone quiet, connect or disconnect
+    /// never answered). Observe does this lazily on a link's next frame; call this
+    /// periodically so links that simply stop are closed too.
+    /// </summary>
+    public List<LinkEvent> Sweep(DateTime now)
+    {
+        var events = new List<LinkEvent>();
+        foreach (var ((modem, local, remote), link) in links)
+            CloseStale(link, modem, local, remote, now, events);
+        return events;
+    }
+
+    private static void CloseStale(Link link, string modem, string local, string remote, DateTime now, List<LinkEvent> events)
+    {
+        if (link.LastFrame == default)
+            return;
+
+        var quiet = now - link.LastFrame;
+        void Close(string detail, string? trouble)
+        {
+            if (trouble != null)
+                events.Add(new LinkEvent(link.LastFrame, modem, local, remote, "unexpected-disconnect", null, trouble));
+            link.State = LinkStates.Disconnected;
+            events.Add(new LinkEvent(link.LastFrame, modem, local, remote, "state", LinkStates.Disconnected, detail));
+            link.ResetSession();
+        }
+
+        if (link.State == LinkStates.Connected && quiet > SilenceLimit)
+            Close("went silent", $"silent for over {(int)SilenceLimit.TotalMinutes} min");
+        else if (link.State == LinkStates.Connecting && quiet > ConnectTimeout)
+            Close($"no connection after {link.Attempts} attempt(s)", null);
+        else if (link.State == LinkStates.Disconnecting && quiet > DisconnectTimeout)
+            Close($"disconnected by {link.DisconnectedBy} (no reply to DISC)", null);
     }
 
     /// <summary>Feeds one classified frame; returns the events it caused, in time order.</summary>
@@ -140,17 +185,7 @@ public sealed class LinkTracker
         }
 
         // Things that should have happened since the last frame
-        if (link.State == LinkStates.Connected && link.LastFrame != default && t - link.LastFrame > SilenceLimit)
-        {
-            Emit("unexpected-disconnect", $"silent for {(int)(t - link.LastFrame).TotalMinutes} min", link.LastFrame);
-            SetState(LinkStates.Disconnected, "went silent", link.LastFrame);
-            link.ResetSession();
-        }
-        else if (link.State == LinkStates.Connecting && link.LastFrame != default && t - link.LastFrame > ConnectTimeout)
-        {
-            SetState(LinkStates.Disconnected, $"no connection after {link.Attempts} attempt(s)", link.LastFrame);
-            link.ResetSession();
-        }
+        CloseStale(link, frame.Modem, frame.Local, frame.Remote, t, events);
 
         var side = frame.Transmitted ? link.Ours : link.Theirs;
         var other = frame.Transmitted ? link.Theirs : link.Ours;
@@ -167,6 +202,18 @@ public sealed class LinkTracker
                     link.ResetSession();
                 }
 
+                // BPQ opens with XID and follows with SABM once it has an answer: one attempt
+                bool sabmAfterXid = frame.Type != "XID" && link.PendingXidFrom == sender;
+                link.PendingXidFrom = frame.Type == "XID" ? sender : null;
+                if (frame.Type == "SABME")
+                    link.Extended = true;
+                if (sabmAfterXid)
+                {
+                    // The XID's answer doesn't answer the SABM
+                    link.AnsweredSinceLastAttempt = false;
+                    break;
+                }
+
                 link.Attempts++;
                 if (link.Attempts > 1)
                     Emit("attempt", link.AnsweredSinceLastAttempt
@@ -179,6 +226,11 @@ public sealed class LinkTracker
 
             case "XID":
                 // Response (or a renegotiation while connected): the other end is alive
+                link.AnsweredSinceLastAttempt = true;
+                break;
+
+            case "DM" or "FRMR" when link.PendingXidFrom != null && link.PendingXidFrom != sender:
+                // The other end doesn't do XID; the SABM that follows is the real attempt
                 link.AnsweredSinceLastAttempt = true;
                 break;
 
@@ -239,7 +291,9 @@ public sealed class LinkTracker
                     link.Attempts = 0;
                     link.ConnectingSince = null;
                 }
-                ObserveSequenced(frame, link, side, other, command, sender, Emit);
+                // Sequence numbers are decoded modulo 8; on a SABME (modulo 128) link they'd be wrong
+                if (!link.Extended)
+                    ObserveSequenced(frame, link, side, other, command, sender, Emit);
                 break;
         }
 
@@ -270,7 +324,8 @@ public sealed class LinkTracker
 
         if (frame.Type == "I" && frame.Ns is { } ns)
         {
-            var key = (frame.InfoLength, Hash(frame.Raw));
+            // N(S) and the info field only: a resend may differ in N(R) or the P bit
+            var key = (frame.InfoLength, Hash(frame.Raw.AsSpan(frame.Raw.Length - frame.InfoLength)));
             if (side.Outstanding.TryGetValue(ns, out var previous) && previous == key)
             {
                 emit("retry", $"N(S)={ns} resent by {sender}", null);
@@ -318,10 +373,10 @@ public sealed class LinkTracker
         }
     }
 
-    private static int Hash(byte[] raw)
+    private static int Hash(ReadOnlySpan<byte> bytes)
     {
         var hash = new HashCode();
-        hash.AddBytes(raw);
+        hash.AddBytes(bytes);
         return hash.ToHashCode();
     }
 
@@ -353,6 +408,8 @@ public sealed class LinkTracker
         public int Attempts;
         public bool AnsweredSinceLastAttempt;
         public string? DisconnectedBy;
+        public string? PendingXidFrom;
+        public bool Extended;
         public long Progress;
         public Side Ours = new();
         public Side Theirs = new();
@@ -370,6 +427,8 @@ public sealed class LinkTracker
         public void ResetSession()
         {
             Attempts = 0;
+            PendingXidFrom = null;
+            Extended = false;
             ConnectingSince = null;
             AnsweredSinceLastAttempt = false;
             Ours = new Side();

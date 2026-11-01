@@ -167,6 +167,7 @@ catch (Exception ex)
 
 // Wait for proxy tasks to complete, then write out the last of the frame history
 await modemRunner.WhenAllStopped();
+linkMonitor.Dispose();
 frameStore.Dispose();
 
 return 0;
