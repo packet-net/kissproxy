@@ -23,9 +23,7 @@ internal class ModemRunner(ConfigManager configManager, ModemStateManager stateM
             return;
 
         var state = stateManager.GetOrCreate(config.Id);
-        var radio = string.IsNullOrWhiteSpace(config.RadioPort)
-            ? null
-            : new TaitRadioLink(config.Id, config.RadioPort, config.RadioBaud, new ConsoleLogger(config.Id), linkMonitor.Store.AddNoise);
+        var radio = StartRadio(config);
         var proxy = new KissProxy(config.Id, new ConsoleLogger(config.Id)) { LinkMonitor = linkMonitor, Radio = radio };
         var cts = CancellationTokenSource.CreateLinkedTokenSource(shutdown);
 
@@ -83,7 +81,20 @@ internal class ModemRunner(ConfigManager configManager, ModemStateManager stateM
             {
                 // Filters etc. take effect at once; parameters reach the modem only on Apply
                 current.Proxy.UpdateConfig(config);
-                running[id] = current with { Config = config };
+                var radio = current.Radio;
+
+                // A new radio setting swaps just the radio, leaving the TNC and node links up
+                if (config.RadioPort != current.Config.RadioPort || config.RadioBaud != current.Config.RadioBaud)
+                {
+                    current.Proxy.Radio = null;
+                    if (radio != null)
+                        await radio.DisposeAsync();
+                    radio = StartRadio(config);
+                    current.Proxy.Radio = radio;
+                    logInfo($"Radio for modem '{id}' is now {config.RadioPort ?? "none"}");
+                }
+
+                running[id] = current with { Config = config, Radio = radio };
             }
         }
         catch (Exception ex)
@@ -119,14 +130,17 @@ internal class ModemRunner(ConfigManager configManager, ModemStateManager stateM
             await current.Radio.DisposeAsync();
     }
 
-    // Settings the proxy reads only when it starts (the serial port and TCP listener, MQTT topics, the radio)
+    // Settings the proxy reads only when it starts (the serial port and TCP listener, MQTT topics)
     private static bool NeedsRestart(Config old, Config updated) =>
         old.ComPort != updated.ComPort
         || old.Baud != updated.Baud
         || old.TcpPort != updated.TcpPort
         || old.AnyHost != updated.AnyHost
         || old.MqttTopicPrefix != updated.MqttTopicPrefix
-        || old.Base64 != updated.Base64
-        || old.RadioPort != updated.RadioPort
-        || old.RadioBaud != updated.RadioBaud;
+        || old.Base64 != updated.Base64;
+
+    private TaitRadioLink? StartRadio(Config config) =>
+        string.IsNullOrWhiteSpace(config.RadioPort)
+            ? null
+            : new TaitRadioLink(config.Id, config.RadioPort, config.RadioBaud, new ConsoleLogger(config.Id), linkMonitor.Store.AddNoise);
 }

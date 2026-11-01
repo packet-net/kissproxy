@@ -163,6 +163,40 @@ public class RadioSignalTests : IDisposable
         store.QueryNoise(T0, T0.AddMinutes(1)).Should().ContainSingle(n => n.FloorDbm == -121.5f && n.MedianIdleDbm == -122f);
     }
 
+    [Fact]
+    public void OurOwnTransmissions_DontMoveTheNoiseFloor()
+    {
+        Idle(T0, TimeSpan.FromSeconds(10), -121);
+        monitor.SetTransmitting(true);
+        Idle(T0.AddSeconds(10), TimeSpan.FromSeconds(5), -40); // the receiver sees our own carrier
+        monitor.SetTransmitting(false);
+
+        monitor.NoiseFloorDbm.Should().BeApproximately(-121, 0.01f);
+    }
+
+    [Fact]
+    public void CarrierTooShortToSample_StillGivesTheFloor()
+    {
+        Idle(T0, TimeSpan.FromSeconds(10), -121);
+        monitor.OnCarrierSense(true, T0.AddSeconds(10.1));
+        monitor.OnCarrierSense(false, T0.AddSeconds(10.2));
+
+        var meta = monitor.Attribute(T0.AddSeconds(10.25), 20, 9600);
+
+        meta.Should().Be(new RadioMetadata(null, null, meta!.NoiseFloorDbm, 0));
+        meta.NoiseFloorDbm.Should().BeApproximately(-121, 0.01f);
+    }
+
+    [Fact]
+    public void ClockSteppingBack_DropsTheOldSamples()
+    {
+        Idle(T0.AddHours(1), TimeSpan.FromSeconds(2), -121);
+        Idle(T0, TimeSpan.FromSeconds(10), -121);
+        Carrier(T0.AddSeconds(10), TimeSpan.FromMilliseconds(400), -90);
+
+        monitor.Attribute(T0.AddSeconds(10.5), 40, 9600)!.SampleCount.Should().Be(10);
+    }
+
     private sealed class FakeRadio : IRadioControl
     {
         public RadioCapabilities Capabilities { get; init; } = RadioCapabilities.RssiRead | RadioCapabilities.CarrierSense;

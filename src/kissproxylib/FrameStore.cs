@@ -80,9 +80,20 @@ public sealed class FrameStore : IDisposable
                     CREATE INDEX IF NOT EXISTS noise_ts ON noise(ts);
                     """);
 
-                // Databases from before radio support lack these columns
-                if (!Convert.ToBoolean(Scalar("SELECT count(*) FROM pragma_table_info('frames') WHERE name = 'rssi'", [])))
-                    Execute("ALTER TABLE frames ADD COLUMN rssi REAL; ALTER TABLE frames ADD COLUMN noise REAL;");
+                // Databases from before radio support lack these columns; added together, so a
+                // crash can't leave one without the other
+                using (var migrate = db.BeginTransaction())
+                {
+                    foreach (var column in new[] { "rssi", "noise" })
+                    {
+                        using var check = db.CreateCommand();
+                        check.Transaction = migrate;
+                        check.CommandText = $"SELECT count(*) FROM pragma_table_info('frames') WHERE name = '{column}'";
+                        if (Convert.ToInt64(check.ExecuteScalar()) == 0)
+                            Execute($"ALTER TABLE frames ADD COLUMN {column} REAL", migrate);
+                    }
+                    migrate.Commit();
+                }
 
                 // Before 2026-11-02 calls were also learned from frames we digipeated or UI
                 // frames we sent; forget any that never originated a connected-mode frame

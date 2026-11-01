@@ -10,8 +10,19 @@ namespace kissproxylib;
 /// </summary>
 public sealed class TaitRadioLink : IAsyncDisposable
 {
-    // RSSI reads failing this many times in a row (about 2 s while busy) means the radio has gone
-    private const int MaxConsecutiveFailures = 50;
+    // RSSI reads failing this many times in a row means the radio has gone. A read that gets no
+    // answer costs the driver's 2 s transaction timeout, so this is about 20 s of silence.
+    private const int MaxConsecutiveFailures = 10;
+
+    // The driver reports Faulted when its keep-alive goes unanswered; give it this long to recover
+    private static readonly TimeSpan FaultedLimit = TimeSpan.FromSeconds(30);
+
+    // Progress messages (carrier-sense edges) are per radio session, and a radio that reboots
+    // comes back without them, so they are turned on again after a fault and every so often
+    private static readonly TimeSpan ProgressRefresh = TimeSpan.FromMinutes(5);
+
+    // A connection must last this long before a later failure starts the backoff from scratch
+    private static readonly TimeSpan StableConnection = TimeSpan.FromMinutes(1);
 
     private readonly string modem;
     private readonly string port;
@@ -33,8 +44,10 @@ public sealed class TaitRadioLink : IAsyncDisposable
         loop = Task.Run(() => RunAsync(cts.Token));
     }
 
-    /// <summary>The radio's state for the web UI, e.g. "connected: Tait TM8110, noise -121 dBm".</summary>
-    public string Status => monitor is { NoiseFloorDbm: { } nf } ? $"{status}, noise floor {nf:F0} dBm" : status;
+    /// <summary>The radio's state for the web UI, e.g. "connected: Tait TM8110, noise floor -121 dBm".</summary>
+    public string Status => monitor is { NoiseFloorDbm: { } nf } && status.StartsWith("connected")
+        ? $"{status}, noise floor {nf:F0} dBm"
+        : status;
 
     /// <summary>Signal readings for a received frame, or null while the radio is down.</summary>
     public RadioMetadata? Attribute(DateTime receivedAt, int ax25Length, int? bitRateHz) =>
@@ -47,6 +60,7 @@ public sealed class TaitRadioLink : IAsyncDisposable
         {
             TaitCcdiRadio? radio = null;
             RadioSignalMonitor? m = null;
+            var connectedAt = DateTime.UtcNow;
             try
             {
                 radio = TaitCcdiRadio.Open(port, baud);
@@ -54,16 +68,38 @@ public sealed class TaitRadioLink : IAsyncDisposable
                 var identity = await radio.QueryIdentityAsync(cancellationToken);
 
                 m = new RadioSignalMonitor(radio, modem, onNoiseSample);
+                var session = new SessionState();
+                var sessionMonitor = m;
+                radio.ConnectionStateChanged += (_, state) => session.OnConnectionState(state);
+                radio.TransmitterStateChanged += (_, e) => sessionMonitor.SetTransmitting(e.Transmitting);
+
                 monitor = m;
                 status = $"connected: {identity.ProductName}";
                 logger.LogInformation("Tait radio on {port}: {product}", port, identity.ProductName);
-                failures = 0;
+                connectedAt = DateTime.UtcNow;
+                var progressSentAt = connectedAt;
 
-                while (!cancellationToken.IsCancellationRequested && m.ConsecutiveFailures < MaxConsecutiveFailures)
+                while (!cancellationToken.IsCancellationRequested)
+                {
                     await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+                    var now = DateTime.UtcNow;
 
-                if (!cancellationToken.IsCancellationRequested)
-                    logger.LogWarning("Tait radio on {port} stopped answering; reopening", port);
+                    if (m.ConsecutiveFailures >= MaxConsecutiveFailures || session.FaultedSince is { } f && now - f > FaultedLimit)
+                    {
+                        logger.LogWarning("Tait radio on {port} stopped answering; reopening", port);
+                        break;
+                    }
+
+                    bool answering = m.ConsecutiveFailures < 3 && session.FaultedSince == null;
+                    status = answering ? $"connected: {identity.ProductName}" : "not answering";
+
+                    if (answering && (session.TakeRecovered() || now - progressSentAt > ProgressRefresh))
+                    {
+                        progressSentAt = now;
+                        try { await radio.SetProgressMessagesAsync(true, cancellationToken); }
+                        catch (Exception ex) when (ex is not OperationCanceledException) { }
+                    }
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -86,6 +122,14 @@ public sealed class TaitRadioLink : IAsyncDisposable
                 }
             }
 
+            if (status.StartsWith("connected") || status == "not answering")
+                status = "reconnecting";
+
+            // Only a connection that lasted starts the backoff again; one that keeps failing
+            // straight after opening backs off like a radio that won't open at all
+            if (DateTime.UtcNow - connectedAt > StableConnection)
+                failures = 0;
+
             // 5 s, 10 s, 20 s, 40 s, then a minute between attempts
             var delay = TimeSpan.FromSeconds(Math.Min(5 * (1 << Math.Min(failures, 4)), 60));
             failures++;
@@ -99,5 +143,42 @@ public sealed class TaitRadioLink : IAsyncDisposable
         cts.Cancel();
         try { await loop; } catch { }
         cts.Dispose();
+    }
+
+    // The driver's connection-state events arrive on its own threads
+    private sealed class SessionState
+    {
+        private readonly object gate = new();
+        private DateTime? faultedSince;
+        private bool recovered;
+
+        public DateTime? FaultedSince { get { lock (gate) return faultedSince; } }
+
+        public void OnConnectionState(TaitConnectionState state)
+        {
+            lock (gate)
+            {
+                if (state == TaitConnectionState.Faulted)
+                {
+                    faultedSince ??= DateTime.UtcNow;
+                }
+                else
+                {
+                    recovered |= faultedSince != null;
+                    faultedSince = null;
+                }
+            }
+        }
+
+        /// <summary>True once after the radio comes back from a fault.</summary>
+        public bool TakeRecovered()
+        {
+            lock (gate)
+            {
+                bool r = recovered;
+                recovered = false;
+                return r;
+            }
+        }
     }
 }

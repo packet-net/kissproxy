@@ -51,9 +51,15 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     private readonly Queue<CarrierWindow> windows = new();
     private readonly List<float> minuteIdle = [];
     private CarrierWindow? currentWindow;
+    private DateTime lastSampleAt;
     private double? noiseFloorDbm;
     private DateTime minuteStart;
     private int consecutiveFailures;
+    private volatile bool transmitting;
+
+    // Released on a carrier rise so the sampler skips the rest of its idle wait: at 9600 baud a
+    // whole frame can be shorter than the 400 ms idle period
+    private readonly SemaphoreSlim wake = new(0, 1);
 
     /// <param name="onNoiseSample">Called once a minute with that minute's noise floor</param>
     /// <param name="startSampling">False to drive samples by hand (tests)</param>
@@ -101,7 +107,8 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
                 var stats = Statistics(samples.Where(s => s.At >= window.RiseAt && s.At <= to).Select(s => s.Dbm));
                 if (stats is { } st)
                     return new RadioMetadata(st.Median, floor is { } f ? st.Median - f : null, floor, st.Count);
-                return null;
+                // The carrier was too short to sample; the floor is still worth keeping
+                return floor != null ? new RadioMetadata(null, null, floor, 0) : null;
             }
 
             // No carrier sense, or the window was missed: samples above the floor count as signal
@@ -121,6 +128,11 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
         NoiseSample? finished = null;
         lock (gate)
         {
+            // After the clock steps back, older-looking samples would never be pruned
+            if (samples.Count > 0 && at < lastSampleAt - TimeSpan.FromSeconds(1))
+                samples.Clear();
+            lastSampleAt = at;
+
             samples.Enqueue((at, dbm));
             while (samples.Count > 0 && samples.Peek().At < at - SampleHorizon)
                 samples.Dequeue();
@@ -137,9 +149,10 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
                 minuteStart = minute;
             }
 
-            bool idle = radio.ChannelBusy is { } busy
+            // While we transmit, the receiver's reading isn't the channel's noise
+            bool idle = !transmitting && (radio.ChannelBusy is { } busy
                 ? !busy && currentWindow == null
-                : noiseFloorDbm is null || dbm < noiseFloorDbm.Value + SignalThresholdDb;
+                : noiseFloorDbm is null || dbm < noiseFloorDbm.Value + SignalThresholdDb);
             if (idle)
             {
                 noiseFloorDbm = noiseFloorDbm is { } nf ? nf + NoiseFloorSmoothing * (dbm - nf) : dbm;
@@ -159,6 +172,8 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             if (busy)
             {
                 currentWindow = new CarrierWindow(at);
+                if (wake.CurrentCount == 0)
+                    wake.Release();
             }
             else if (currentWindow is { } w)
             {
@@ -172,6 +187,9 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     }
 
     private void OnCarrierSenseChanged(object? sender, CarrierSenseChange e) => OnCarrierSense(e.Busy, e.At.UtcDateTime);
+
+    /// <summary>Our own transmitter keyed or released (from the radio's progress reports).</summary>
+    public void SetTransmitting(bool keyed) => transmitting = keyed;
 
     // The frame belongs to the window whose carrier carried it. Delivery trails carrier-fall by
     // the modem's latency, so closed windows stay eligible for a slack, and the next station may
@@ -214,7 +232,7 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             }
 
             bool busy = radio.ChannelBusy != false;
-            try { await Task.Delay(busy ? BusySamplePeriod : IdleSamplePeriod, cancellationToken); }
+            try { await wake.WaitAsync(busy ? BusySamplePeriod : IdleSamplePeriod, cancellationToken); }
             catch (OperationCanceledException) { return; }
         }
     }
@@ -240,6 +258,7 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             try { await samplerLoop; } catch { }
         }
         cts.Dispose();
+        wake.Dispose();
     }
 
     private sealed class CarrierWindow(DateTime riseAt)
