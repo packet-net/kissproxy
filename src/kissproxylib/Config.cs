@@ -34,6 +34,11 @@ public record Config
     // Periodic parameter send interval (seconds, 0 = on connect only)
     public int ParameterSendInterval { get; set; } = 0;
 
+    // Tait radio on this modem's channel, read over CCDI for per-frame RSSI/SNR and the noise
+    // floor (e.g. /dev/serial/by-id/...); null for none
+    public string? RadioPort { get; set; }
+    public int RadioBaud { get; set; } = 28800;
+
     // NinoTNC mode configuration
     public int? NinoMode { get; set; }            // 0-14
     public bool PersistNinoMode { get; set; } = false;  // false = add 16 to NOT flash

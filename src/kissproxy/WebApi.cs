@@ -333,8 +333,17 @@ public static class WebApi
             var now = DateTime.UtcNow;
             var (start, end) = Window(from, to, now);
             var timeline = TimelineBuilder.Build(linkMonitor, start, end, now);
+            var noise = linkMonitor.Store.QueryNoise(start, end).ToLookup(n => n.Modem);
+            var radioModems = proxyInstances.Where(p => p.Value.Radio != null).Select(p => p.Key).Concat(noise.Select(g => g.Key)).Distinct();
             return Results.Json(new
             {
+                // Per modem with a radio: its state now and the noise floor across the window
+                radios = radioModems.Select(m => new
+                {
+                    modem = m,
+                    status = proxyInstances.TryGetValue(m, out var p) ? p.Radio?.Status : null,
+                    noise = noise[m].Select(n => new { t = FrameStore.ToMs(n.Timestamp), floor = Math.Round(n.FloorDbm, 1), median = n.MedianIdleDbm is { } md ? Math.Round(md, 1) : (double?)null }),
+                }),
                 from = FrameStore.ToMs(timeline.From),
                 to = FrameStore.ToMs(timeline.To),
                 now = FrameStore.ToMs(now),
@@ -375,6 +384,8 @@ public static class WebApi
                         frame,
                         text,
                         snr = f.Snr,
+                        rssi = f.Rssi,
+                        noise = f.NoiseFloor,
                         raw = Convert.ToHexString(f.Raw),
                     };
                 }),

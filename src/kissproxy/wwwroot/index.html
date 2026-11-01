@@ -1514,6 +1514,19 @@
                                 </div>
                             </div>
                             <div class="mqtt-per-modem" style="margin-top: 15px;">
+                                <div class="section-title" style="font-size: 0.8rem; margin-bottom: 10px;">Tait Radio (CCDI, for RSSI and SNR)</div>
+                                <div class="config-grid">
+                                    <div class="config-field">
+                                        <label>Serial Port (blank for none)</label>
+                                        <input type="text" value="${esc(c.radioPort || '')}" placeholder="e.g. /dev/serial/by-id/usb-FTDI-..." onchange="updateConfig('${c.id}', 'radioPort', this.value.trim() || null)">
+                                    </div>
+                                    <div class="config-field">
+                                        <label>Baud Rate</label>
+                                        <input type="number" value="${c.radioBaud || 28800}" onchange="updateConfig('${c.id}', 'radioBaud', parseInt(this.value) || 28800)">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mqtt-per-modem" style="margin-top: 15px;">
                                 <div class="section-title" style="font-size: 0.8rem; margin-bottom: 10px;">MQTT (Per-Modem)</div>
                                 <div class="config-grid">
                                     <div class="config-field">
@@ -1952,6 +1965,7 @@
                 if (it.kind === 'group') {
                     parts.push(`<rect x="0" y="${y}" width="${width}" height="${TL.group}" fill="rgba(15,52,96,0.5)"/>`);
                     parts.push(`<text x="10" y="${y + 16}" font-weight="bold">${esc(it.modem)}</text><text x="${10 + it.modem.length * 9 + 8}" y="${y + 16}" class="muted">${it.count} link${it.count === 1 ? '' : 's'}</text>`);
+                    parts.push(renderNoiseTrace(it.modem, y, x));
                     y += TL.group;
                 } else if (it.kind === 'heard') {
                     parts.push(`<g class="row-label" data-heard="${esc(it.modem)}"><rect x="0" y="${y}" width="${TL.label}" height="${TL.row}" fill="transparent"/>` +
@@ -1987,6 +2001,29 @@
 
             wrap.innerHTML = `<svg id="timeline-svg" viewBox="0 0 ${width} ${height}" height="${height}">${axis.join('')}${parts.join('')}${sel}</svg>`;
             attachTimelineEvents(x, plotW);
+        }
+
+        // The noise floor across the window, in the port's heading row, scaled to its own range
+        function renderNoiseTrace(modem, y, x) {
+            const radio = (tl.data.radios || []).find(r => r.modem === modem);
+            if (!radio) return '';
+            const pts = radio.noise;
+            const status = radio.status ? `radio ${radio.status}` : 'no radio configured now (earlier noise history shown)';
+            let out = '';
+            if (pts.length) {
+                const lo = Math.min(...pts.map(p => p.floor)), hi = Math.max(...pts.map(p => p.floor));
+                const span = Math.max(2, hi - lo);
+                const py = f => y + TL.group - 3 - (f - lo) / span * (TL.group - 6);
+                const line = pts.map(p => `${x(p.t).toFixed(1)},${py(p.floor).toFixed(1)}`).join(' ');
+                out += `<polyline points="${line}" fill="none" stroke="#4fc3f7" stroke-width="1.5"/>` +
+                    `<rect x="${TL.label}" y="${y}" width="${x(tl.data.to) - TL.label}" height="${TL.group}" fill="transparent">` +
+                    `<title>Noise floor ${lo.toFixed(0)} to ${hi.toFixed(0)} dBm over this window (blue line)\n${esc(status)}</title></rect>`;
+            }
+            // Short, to fit beside the port name; the full status is in the hover text
+            const up = (radio.status || '').startsWith('connected');
+            const label = !radio.status ? 'no radio' : !up ? 'radio down' : pts.length ? `noise ${pts[pts.length - 1].floor.toFixed(0)} dBm` : 'radio up';
+            out += `<text x="${TL.label - 8}" y="${y + 16}" text-anchor="end" class="muted" font-size="11">${esc(label)}<title>${esc(status)}</title></text>`;
+            return out;
         }
 
         function renderTimelineRow(r, y, width, x) {
@@ -2145,6 +2182,12 @@
             loadFrames();
         }
 
+        function snrCell(f) {
+            if (f.snr == null && f.rssi == null) return '<td></td>';
+            const detail = [f.rssi != null ? `RSSI ${f.rssi.toFixed(1)} dBm` : null, f.noise != null ? `noise floor ${f.noise.toFixed(1)} dBm` : null].filter(Boolean).join(', ');
+            return `<td title="${esc(detail)}">${f.snr != null ? f.snr.toFixed(1) : ''}</td>`;
+        }
+
         async function loadFrames() {
             if (!tl.sel) return;
             const q = new URLSearchParams({ from: Math.round(tl.sel.s), to: Math.round(tl.sel.e), offset: tl.page * PAGE, limit: PAGE });
@@ -2157,7 +2200,7 @@
                 `<tr class="frame-row ${f.dir.toLowerCase()}" data-i="${i}">` +
                 `<td>${fmtTime(f.t, withDate)}.${String(f.t % 1000).padStart(3, '0').slice(0, 1)}</td><td>${esc(f.modem)}</td><td class="dir">${f.dir}</td>` +
                 `<td>${esc(f.src)}</td><td>${esc(f.dest)}${f.path ? ' via ' + esc(f.path) : ''}</td><td>${esc(f.frame)}</td>` +
-                `<td class="text">${esc(f.text)}</td><td>${f.snr === null || f.snr === undefined ? '' : f.snr.toFixed(1)}</td></tr>`);
+                `<td class="text">${esc(f.text)}</td>${snrCell(f)}</tr>`);
             const table = document.getElementById('frames-table');
             table.innerHTML = '<thead><tr><th>Time</th><th>Port</th><th>Dir</th><th>From</th><th>To</th><th>Frame</th><th>Content</th><th>SNR dB</th></tr></thead>' +
                 `<tbody>${rows.join('') || '<tr><td colspan="8" style="color:var(--text-muted);padding:12px">No frames in the selection.</td></tr>'}</tbody>`;

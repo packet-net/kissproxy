@@ -34,6 +34,9 @@ public sealed class FrameStore : IDisposable
     private readonly List<FrameRecord> memoryFrames = [];
     private readonly List<LinkEvent> memoryEvents = [];
     private readonly HashSet<string> pendingLocalCalls = [];
+    private List<NoiseSample> pendingNoise = [];
+    private List<NoiseSample> inFlightNoise = [];
+    private readonly List<NoiseSample> memoryNoise = [];
 
     private readonly object dbLock = new();
     private DateTime lastPrune = DateTime.MinValue;
@@ -63,7 +66,8 @@ public sealed class FrameStore : IDisposable
                         ts INTEGER NOT NULL, modem TEXT NOT NULL, tx INTEGER NOT NULL, kport INTEGER NOT NULL,
                         src TEXT NOT NULL, dest TEXT NOT NULL, path TEXT NOT NULL, type TEXT NOT NULL, cr TEXT,
                         pf INTEGER NOT NULL, ns INTEGER, nr INTEGER, pid INTEGER, info_len INTEGER NOT NULL,
-                        summary TEXT NOT NULL, raw BLOB NOT NULL, local TEXT, remote TEXT NOT NULL, snr REAL);
+                        summary TEXT NOT NULL, raw BLOB NOT NULL, local TEXT, remote TEXT NOT NULL, snr REAL,
+                        rssi REAL, noise REAL);
                     DROP INDEX IF EXISTS frames_ts;
                     CREATE INDEX IF NOT EXISTS frames_activity ON frames(ts, modem, local, remote, tx);
                     CREATE INDEX IF NOT EXISTS frames_link ON frames(modem, remote, ts);
@@ -72,7 +76,13 @@ public sealed class FrameStore : IDisposable
                         kind TEXT NOT NULL, state TEXT, detail TEXT);
                     CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
                     CREATE TABLE IF NOT EXISTS local_calls (call TEXT PRIMARY KEY);
+                    CREATE TABLE IF NOT EXISTS noise (ts INTEGER NOT NULL, modem TEXT NOT NULL, floor REAL NOT NULL, median REAL);
+                    CREATE INDEX IF NOT EXISTS noise_ts ON noise(ts);
                     """);
+
+                // Databases from before radio support lack these columns
+                if (!Convert.ToBoolean(Scalar("SELECT count(*) FROM pragma_table_info('frames') WHERE name = 'rssi'", [])))
+                    Execute("ALTER TABLE frames ADD COLUMN rssi REAL; ALTER TABLE frames ADD COLUMN noise REAL;");
 
                 // Before 2026-11-02 calls were also learned from frames we digipeated or UI
                 // frames we sent; forget any that never originated a connected-mode frame
@@ -120,6 +130,35 @@ public sealed class FrameStore : IDisposable
     private bool warnedDropping;
     private readonly object flushLock = new();
 
+    /// <summary>A minute's noise floor on a modem's channel.</summary>
+    public void AddNoise(NoiseSample sample)
+    {
+        lock (pendingLock)
+            pendingNoise.Add(sample);
+    }
+
+    /// <summary>Noise-floor samples in [from, to), oldest first.</summary>
+    public IReadOnlyList<NoiseSample> QueryNoise(DateTime from, DateTime to)
+    {
+        var result = new List<NoiseSample>();
+        lock (dbLock)
+        {
+            if (db != null)
+            {
+                using var cmd = db.CreateCommand();
+                cmd.CommandText = "SELECT ts, modem, floor, median FROM noise WHERE ts >= $from AND ts < $to";
+                cmd.Parameters.AddWithValue("$from", ToMs(from));
+                cmd.Parameters.AddWithValue("$to", ToMs(to));
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                    result.Add(new NoiseSample(FromMs(r.GetInt64(0)), r.GetString(1), (float)r.GetDouble(2), r.IsDBNull(3) ? null : (float)r.GetDouble(3)));
+            }
+            lock (pendingLock)
+                result.AddRange(memoryNoise.Concat(inFlightNoise).Concat(pendingNoise).Where(n => n.Timestamp >= from && n.Timestamp < to));
+        }
+        return result.OrderBy(n => n.Timestamp).ToList();
+    }
+
     public void AddLocalCall(string call)
     {
         lock (pendingLock)
@@ -138,8 +177,10 @@ public sealed class FrameStore : IDisposable
             {
                 inFlightFrames = pendingFrames;
                 inFlightEvents = pendingEvents;
+                inFlightNoise = pendingNoise;
                 pendingFrames = [];
                 pendingEvents = [];
+                pendingNoise = [];
                 locals = [.. pendingLocalCalls];
                 pendingLocalCalls.Clear();
             }
@@ -156,6 +197,8 @@ public sealed class FrameStore : IDisposable
                             memoryFrames.AddRange(inFlightFrames);
                             memoryEvents.AddRange(inFlightEvents);
                             memoryFrames.RemoveAll(f => f.Timestamp < cutoff);
+                            memoryNoise.AddRange(inFlightNoise);
+                            memoryNoise.RemoveAll(n => n.Timestamp < cutoff);
                             var keep = LatestStates(memoryEvents);
                             memoryEvents.RemoveAll(e => e.Timestamp < cutoff && !keep.Contains(e));
                         }
@@ -165,6 +208,9 @@ public sealed class FrameStore : IDisposable
                         using var tx = db.BeginTransaction();
                         WriteFrames(tx, inFlightFrames);
                         WriteEvents(tx, inFlightEvents);
+                        foreach (var n in inFlightNoise)
+                            Execute("INSERT INTO noise VALUES ($ts, $m, $f, $md)", tx, ("$ts", ToMs(n.Timestamp)), ("$m", n.Modem),
+                                ("$f", (double)n.FloorDbm), ("$md", n.MedianIdleDbm is { } md ? (double)md : DBNull.Value));
                         foreach (var call in locals)
                             Execute("INSERT OR IGNORE INTO local_calls(call) VALUES ($c)", tx, ("$c", call));
 
@@ -173,6 +219,7 @@ public sealed class FrameStore : IDisposable
                         {
                             var cutoff = ToMs(now - retention);
                             Execute("DELETE FROM frames WHERE ts < $c", tx, ("$c", cutoff));
+                            Execute("DELETE FROM noise WHERE ts < $c", tx, ("$c", cutoff));
                             // Keep every link's latest state, or a link up for over a week loses its bar
                             Execute("""
                                 DELETE FROM events WHERE ts < $c AND rowid NOT IN (
@@ -191,6 +238,7 @@ public sealed class FrameStore : IDisposable
                     {
                         inFlightFrames = [];
                         inFlightEvents = [];
+                        inFlightNoise = [];
                     }
                 }
                 catch
@@ -200,8 +248,10 @@ public sealed class FrameStore : IDisposable
                     {
                         pendingFrames.InsertRange(0, inFlightFrames);
                         pendingEvents.InsertRange(0, inFlightEvents);
+                        pendingNoise.InsertRange(0, inFlightNoise);
                         inFlightFrames = [];
                         inFlightEvents = [];
+                        inFlightNoise = [];
                         foreach (var call in locals)
                             pendingLocalCalls.Add(call);
                     }
@@ -412,11 +462,13 @@ public sealed class FrameStore : IDisposable
         using var cmd = db!.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT INTO frames VALUES ($ts, $modem, $tx, $kport, $src, $dest, $path, $type, $cr, $pf, $ns, $nr, $pid,
-                $info_len, $summary, $raw, $local, $remote, $snr)
+            INSERT INTO frames (ts, modem, tx, kport, src, dest, path, type, cr, pf, ns, nr, pid, info_len, summary, raw,
+                local, remote, snr, rssi, noise)
+            VALUES ($ts, $modem, $tx, $kport, $src, $dest, $path, $type, $cr, $pf, $ns, $nr, $pid,
+                $info_len, $summary, $raw, $local, $remote, $snr, $rssi, $noise)
             """;
         var p = new Dictionary<string, SqliteParameter>();
-        foreach (var name in new[] { "$ts", "$modem", "$tx", "$kport", "$src", "$dest", "$path", "$type", "$cr", "$pf", "$ns", "$nr", "$pid", "$info_len", "$summary", "$raw", "$local", "$remote", "$snr" })
+        foreach (var name in new[] { "$ts", "$modem", "$tx", "$kport", "$src", "$dest", "$path", "$type", "$cr", "$pf", "$ns", "$nr", "$pid", "$info_len", "$summary", "$raw", "$local", "$remote", "$snr", "$rssi", "$noise" })
             p[name] = cmd.Parameters.Add(new SqliteParameter { ParameterName = name });
 
         foreach (var f in frames)
@@ -440,6 +492,8 @@ public sealed class FrameStore : IDisposable
             p["$local"].Value = (object?)f.Local ?? DBNull.Value;
             p["$remote"].Value = f.Remote;
             p["$snr"].Value = (object?)f.Snr ?? DBNull.Value;
+            p["$rssi"].Value = (object?)f.Rssi ?? DBNull.Value;
+            p["$noise"].Value = (object?)f.NoiseFloor ?? DBNull.Value;
             cmd.ExecuteNonQuery();
         }
     }
@@ -485,7 +539,8 @@ public sealed class FrameStore : IDisposable
                 r.IsDBNull(8) ? null : r.GetString(8)[0], r.GetInt32(9) == 1,
                 r.IsDBNull(10) ? null : r.GetInt32(10), r.IsDBNull(11) ? null : r.GetInt32(11),
                 r.IsDBNull(12) ? null : r.GetInt32(12), r.GetInt32(13), r.GetString(14), (byte[])r.GetValue(15),
-                r.IsDBNull(16) ? null : r.GetString(16), r.GetString(17), r.IsDBNull(18) ? null : r.GetDouble(18)));
+                r.IsDBNull(16) ? null : r.GetString(16), r.GetString(17), r.IsDBNull(18) ? null : r.GetDouble(18),
+                r.IsDBNull(19) ? null : r.GetDouble(19), r.IsDBNull(20) ? null : r.GetDouble(20)));
         }
         return frames;
     }

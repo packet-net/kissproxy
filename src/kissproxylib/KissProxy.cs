@@ -38,6 +38,9 @@ public class KissProxy
     /// <summary>Where every frame is recorded for the link timeline, if anywhere.</summary>
     public LinkMonitor? LinkMonitor { get; set; }
 
+    /// <summary>The radio on this modem's channel, for received frames' RSSI and SNR, if any.</summary>
+    public TaitRadioLink? Radio { get; set; }
+
     public KissProxy(ILogger logger) : this("", logger) { }
 
     public KissProxy(string instance, ILogger logger)
@@ -1045,7 +1048,11 @@ public class KissProxy
     {
         try
         {
-            LinkMonitor?.Record(instance, transmitted: direction == "TX", kissFrame);
+            var now = DateTime.UtcNow;
+            var radio = Radio;
+            int? bitRate = currentConfig?.NinoMode is { } mode ? KissFrameBuilder.GetModeInfo(mode)?.BitRateHz : null;
+            LinkMonitor?.Record(instance, transmitted: direction == "TX", kissFrame, now,
+                radio == null ? null : length => radio.Attribute(now, length, bitRate));
         }
         catch (Exception ex)
         {

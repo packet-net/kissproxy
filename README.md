@@ -39,6 +39,7 @@ kissproxylib is a .NET library version which can be used to integrate a KISS pro
 - **Links tab** in the web UI: a timeline of the last 24 hours (or any of the last 7 days), one row per connection (our callsign and a link partner), grouped by port, with stations only heard folded away
 - Bars show when each link was connecting, up, or disconnecting; markers show trouble: resent frames, polls that get nowhere, repeated or unanswered connects, rejects, refusals and unexpected disconnects
 - Drag the two handles to pick a window; the table below lists its frames (time, port, direction, from, to, frame, content, SNR). Click a row's name to show only that link; click a frame for its raw bytes
+- **Tait radio (optional)**: give a modem its Tait TM8100/TM8200's CCDI serial port and every received frame gets its RSSI and SNR (the median RSSI while its carrier was up, against the channel-idle noise floor), and each port's heading on the timeline shows the noise floor over time
 - Frames are kept for 7 days in SQLite at `/var/lib/kissproxy/frames.db` (next to the config when run from source), written in batches every 5 minutes to spare SD cards
 
 ### MQTT Integration
