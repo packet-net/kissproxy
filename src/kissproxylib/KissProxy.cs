@@ -35,6 +35,9 @@ public class KissProxy
     private TcpClient? activeTcpClient;
     private readonly object tcpLock = new();
 
+    /// <summary>Where every frame is recorded for the link timeline, if anywhere.</summary>
+    public LinkMonitor? LinkMonitor { get; set; }
+
     public KissProxy(ILogger logger) : this("", logger) { }
 
     public KissProxy(string instance, ILogger logger)
@@ -1040,6 +1043,15 @@ public class KissProxy
     /// </summary>
     private void LogFrame(string direction, byte[] kissFrame)
     {
+        try
+        {
+            LinkMonitor?.Record(instance, transmitted: direction == "TX", kissFrame);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("Recording frame for the link timeline failed: {error}", ex.Message);
+        }
+
         if (!logger.IsEnabled(LogLevel.Information))
             return;
 

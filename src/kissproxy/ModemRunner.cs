@@ -7,7 +7,7 @@ namespace kissproxy;
 /// Owns the running proxy for each configured modem: starts one per modem, stops it when
 /// the modem is deleted, and restarts it when a setting it only reads at start changes.
 /// </summary>
-internal class ModemRunner(ConfigManager configManager, ModemStateManager stateManager, Action<string> logInfo, CancellationToken shutdown)
+internal class ModemRunner(ConfigManager configManager, ModemStateManager stateManager, LinkMonitor linkMonitor, Action<string> logInfo, CancellationToken shutdown)
 {
     private record Running(KissProxy Proxy, Config Config, CancellationTokenSource Cts, Task Task);
 
@@ -23,7 +23,7 @@ internal class ModemRunner(ConfigManager configManager, ModemStateManager stateM
             return;
 
         var state = stateManager.GetOrCreate(config.Id);
-        var proxy = new KissProxy(config.Id, new ConsoleLogger(config.Id));
+        var proxy = new KissProxy(config.Id, new ConsoleLogger(config.Id)) { LinkMonitor = linkMonitor };
         var cts = CancellationTokenSource.CreateLinkedTokenSource(shutdown);
 
         // Global settings (MQTT etc.) are read as the proxy starts
