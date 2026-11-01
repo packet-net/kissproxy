@@ -31,9 +31,18 @@ public class ConfigManager
     /// </summary>
     public event Action? GlobalConfigChanged;
 
+    // Web requests change the config concurrently; this guards the modem list and saves
+    private readonly object sync = new();
+
     public string ConfigPath => configPath;
     public bool IsWriteable => isWriteable;
     public GlobalConfig Config => config;
+
+    /// <summary>A copy of the modem list, safe to enumerate while requests change it.</summary>
+    public IReadOnlyList<Config> Modems
+    {
+        get { lock (sync) return config.Modems.ToList(); }
+    }
 
     public ConfigManager(string path)
     {
@@ -147,8 +156,47 @@ public class ConfigManager
             throw new InvalidOperationException($"Config file is not writeable: {configPath}");
         }
 
-        var json = JsonSerializer.Serialize(config, JsonOptions);
-        File.WriteAllText(configPath, json);
+        // Serialise and write under one lock, so concurrent saves can't land out of order
+        lock (saveLock)
+        {
+            string json;
+            lock (sync)
+                json = JsonSerializer.Serialize(config, JsonOptions);
+
+            WriteAtomically(json);
+        }
+    }
+
+    private readonly object saveLock = new();
+
+    // Write to a temp file and rename over the config, so a power cut mid-save can't leave
+    // truncated JSON (which would stop every modem starting). Falls back to a plain write
+    // when the directory isn't writeable.
+    private void WriteAtomically(string json)
+    {
+        // Replace the file a symlink points at, not the link
+        var fullPath = Path.GetFullPath(configPath);
+        var target = File.Exists(fullPath)
+            ? File.ResolveLinkTarget(fullPath, returnFinalTarget: true)?.FullName ?? fullPath
+            : fullPath;
+        var dir = Path.GetDirectoryName(target) ?? ".";
+        var temp = Path.Combine(dir, $".{Path.GetFileName(target)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write))
+            {
+                stream.Write(System.Text.Encoding.UTF8.GetBytes(json));
+                stream.Flush(flushToDisk: true);
+            }
+            if (!OperatingSystem.IsWindows() && File.Exists(target))
+                File.SetUnixFileMode(temp, File.GetUnixFileMode(target));
+            File.Move(temp, target, overwrite: true);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            try { File.Delete(temp); } catch { }
+            File.WriteAllText(target, json);
+        }
     }
 
     /// <summary>
@@ -156,7 +204,8 @@ public class ConfigManager
     /// </summary>
     public Config? GetModem(string id)
     {
-        return config.Modems.FirstOrDefault(m => m.Id == id);
+        lock (sync)
+            return config.Modems.FirstOrDefault(m => m.Id == id);
     }
 
     /// <summary>
@@ -165,13 +214,16 @@ public class ConfigManager
     /// <exception cref="KeyNotFoundException">Thrown if modem ID doesn't exist.</exception>
     public void UpdateModem(Config modem)
     {
-        var index = config.Modems.FindIndex(m => m.Id == modem.Id);
-        if (index < 0)
+        lock (sync)
         {
-            throw new KeyNotFoundException($"Modem '{modem.Id}' not found");
-        }
+            var index = config.Modems.FindIndex(m => m.Id == modem.Id);
+            if (index < 0)
+            {
+                throw new KeyNotFoundException($"Modem '{modem.Id}' not found");
+            }
 
-        config.Modems[index] = modem;
+            config.Modems[index] = modem;
+        }
         ModemConfigChanged?.Invoke(modem.Id);
     }
 
@@ -181,12 +233,15 @@ public class ConfigManager
     /// <exception cref="InvalidOperationException">Thrown if modem ID already exists.</exception>
     public void AddModem(Config modem)
     {
-        if (config.Modems.Any(m => m.Id == modem.Id))
+        lock (sync)
         {
-            throw new InvalidOperationException($"Modem '{modem.Id}' already exists");
-        }
+            if (config.Modems.Any(m => m.Id == modem.Id))
+            {
+                throw new InvalidOperationException($"Modem '{modem.Id}' already exists");
+            }
 
-        config.Modems.Add(modem);
+            config.Modems.Add(modem);
+        }
         ModemConfigChanged?.Invoke(modem.Id);
     }
 
@@ -196,13 +251,16 @@ public class ConfigManager
     /// <exception cref="KeyNotFoundException">Thrown if modem ID doesn't exist.</exception>
     public void RemoveModem(string id)
     {
-        var index = config.Modems.FindIndex(m => m.Id == id);
-        if (index < 0)
+        lock (sync)
         {
-            throw new KeyNotFoundException($"Modem '{id}' not found");
-        }
+            var index = config.Modems.FindIndex(m => m.Id == id);
+            if (index < 0)
+            {
+                throw new KeyNotFoundException($"Modem '{id}' not found");
+            }
 
-        config.Modems.RemoveAt(index);
+            config.Modems.RemoveAt(index);
+        }
         ModemConfigChanged?.Invoke(id);
     }
 
@@ -221,31 +279,35 @@ public class ConfigManager
         bool clearMqttUsername = false,
         bool clearMqttPassword = false)
     {
-        if (webPort.HasValue)
-            config = config with { WebPort = webPort.Value };
+        lock (sync)
+        {
+            if (webPort.HasValue)
+                config = config with { WebPort = webPort.Value };
 
-        if (password != null)
-            config = config with { Password = password };
+            // An empty password would reopen first-login, so it can't be cleared this way
+            if (!string.IsNullOrEmpty(password))
+                config = config with { Password = password };
 
-        if (clearMyCallsign)
-            config = config with { MyCallsign = null };
-        else if (myCallsign != null)
-            config = config with { MyCallsign = myCallsign.ToUpper().Trim() };
+            if (clearMyCallsign)
+                config = config with { MyCallsign = null };
+            else if (myCallsign != null)
+                config = config with { MyCallsign = myCallsign.ToUpper().Trim() };
 
-        if (clearMqttServer)
-            config = config with { MqttServer = null };
-        else if (mqttServer != null)
-            config = config with { MqttServer = mqttServer };
+            if (clearMqttServer)
+                config = config with { MqttServer = null };
+            else if (mqttServer != null)
+                config = config with { MqttServer = mqttServer };
 
-        if (clearMqttUsername)
-            config = config with { MqttUsername = null };
-        else if (mqttUsername != null)
-            config = config with { MqttUsername = mqttUsername };
+            if (clearMqttUsername)
+                config = config with { MqttUsername = null };
+            else if (mqttUsername != null)
+                config = config with { MqttUsername = mqttUsername };
 
-        if (clearMqttPassword)
-            config = config with { MqttPassword = null };
-        else if (mqttPassword != null)
-            config = config with { MqttPassword = mqttPassword };
+            if (clearMqttPassword)
+                config = config with { MqttPassword = null };
+            else if (mqttPassword != null)
+                config = config with { MqttPassword = mqttPassword };
+        }
 
         GlobalConfigChanged?.Invoke();
     }
@@ -269,7 +331,7 @@ public class ConfigManager
     /// </summary>
     public bool TrySetInitialPassword(string password)
     {
-        lock (initialPasswordLock)
+        lock (sync)
         {
             if (!string.IsNullOrEmpty(config.Password) || string.IsNullOrEmpty(password))
                 return false;
@@ -286,7 +348,6 @@ public class ConfigManager
         return true;
     }
 
-    private readonly object initialPasswordLock = new();
 
     /// <summary>
     /// Returns true if the config is using the old array format (no password set).

@@ -375,4 +375,82 @@ public class ConfigManagerTests : IDisposable
 
         changedId.Should().Be("2m");
     }
+
+    [Fact]
+    public void Save_KeepsFileModeAndLeavesNoTempFiles()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var path = CreateTempConfig("""{ "password": "test", "modems": [] }""");
+        File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        var manager = new ConfigManager(path);
+        manager.Load();
+
+        manager.AddModem(new Config { Id = "6m", ComPort = "/dev/ttyACM2" });
+        manager.Save();
+
+        File.GetUnixFileMode(path).Should().Be(UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        Directory.GetFiles(Path.GetDirectoryName(path)!, "*.tmp").Should().BeEmpty();
+        new ConfigManager(path).Load().Modems.Should().ContainSingle(m => m.Id == "6m");
+    }
+
+    [Fact]
+    public void UpdateGlobal_EmptyPassword_DoesNotClearIt()
+    {
+        var path = CreateTempConfig("""{ "password": "secret", "modems": [] }""");
+        var manager = new ConfigManager(path);
+        manager.Load();
+
+        manager.UpdateGlobal(password: "");
+
+        manager.ValidatePassword("secret").Should().BeTrue();
+        manager.NeedsMigration.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Modems_IsASnapshot()
+    {
+        var path = CreateTempConfig("""{ "password": "x", "modems": [ { "id": "2m", "comPort": "a" } ] }""");
+        var manager = new ConfigManager(path);
+        manager.Load();
+
+        var snapshot = manager.Modems;
+        manager.AddModem(new Config { Id = "6m", ComPort = "b" });
+
+        snapshot.Should().HaveCount(1);
+        manager.Modems.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public void Save_ThroughSymlink_UpdatesTheTarget()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var real = CreateTempConfig("""{ "password": "x", "modems": [] }""");
+        var link = Path.Combine(Path.GetDirectoryName(real)!, "link.conf");
+        File.CreateSymbolicLink(link, Path.GetFileName(real));  // relative link
+        var manager = new ConfigManager(link);
+        manager.Load();
+
+        manager.AddModem(new Config { Id = "6m", ComPort = "/dev/ttyACM2" });
+        manager.Save();
+
+        new FileInfo(link).LinkTarget.Should().NotBeNull();
+        new ConfigManager(real).Load().Modems.Should().ContainSingle(m => m.Id == "6m");
+    }
+
+    [Fact]
+    public void Save_FileDeletedWhileRunning_RecreatesIt()
+    {
+        var path = CreateTempConfig("""{ "password": "x", "modems": [] }""");
+        var manager = new ConfigManager(path);
+        manager.Load();
+        File.Delete(path);
+
+        manager.Save();
+
+        new ConfigManager(path).Load().Password.Should().Be("x");
+    }
 }

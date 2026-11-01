@@ -747,6 +747,8 @@
             }
         }
 
+        let agoTimer = null;
+
         function showLogin() {
             document.getElementById('login-screen').style.display = 'flex';
             document.getElementById('app').style.display = 'none';
@@ -770,8 +772,8 @@
             // Connect to real-time stats stream
             connectStatsStream();
 
-            // Update "ago" times every second
-            setInterval(updateAgoTimes, 1000);
+            // Update "ago" times every second (once, however many times we log in)
+            if (!agoTimer) agoTimer = setInterval(updateAgoTimes, 1000);
         }
 
         async function loadConfigStatus() {

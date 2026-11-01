@@ -3,6 +3,7 @@ using kissproxylib;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -22,6 +23,17 @@ public static class WebApi
         WriteIndented = true
     };
 
+    // Compact JSON for SSE: each event must be a single line
+    private static readonly JsonSerializerOptions SseJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        WriteIndented = false
+    };
+
+    // A browser gets at most this many updates a second per modem, however busy the channel
+    private static readonly TimeSpan SseMinInterval = TimeSpan.FromMilliseconds(250);
+
     /// <summary>
     /// Maps all API endpoints to the web application.
     /// </summary>
@@ -29,7 +41,7 @@ public static class WebApi
         IEndpointRouteBuilder app,
         ConfigManager configManager,
         ModemStateManager stateManager,
-        Dictionary<string, KissProxy> proxyInstances)
+        IReadOnlyDictionary<string, KissProxy> proxyInstances)
     {
         // Login endpoint (no auth required)
         app.MapPost("/api/login", (HttpContext ctx) => HandleLogin(ctx, configManager));
@@ -56,7 +68,7 @@ public static class WebApi
         // Modems - list all
         api.MapGet("/modems", () =>
         {
-            var modems = configManager.Config.Modems.Select(m => new
+            var modems = configManager.Modems.Select(m => new
             {
                 config = m,
                 state = stateManager.GetSnapshot(m.Id)
@@ -101,33 +113,42 @@ public static class WebApi
             ctx.Response.Headers.CacheControl = "no-cache";
             ctx.Response.Headers.Connection = "keep-alive";
 
-            // Use a channel to serialize SSE writes — StateChanged fires from multiple threads
-            // (serial reader + TCP reader) and concurrent writes to the response body corrupt
-            // the SSE stream, causing the browser to drop events.
-            var channel = Channel.CreateUnbounded<(string id, ModemState state)>(
-                new UnboundedChannelOptions { SingleReader = true });
+            // StateChanged fires from several threads (serial reader, TCP reader) and concurrent
+            // writes to the response body corrupt the stream, so one loop does all the writing.
+            // Changes are coalesced: each modem marked dirty is sent once with its latest state,
+            // at most every SseMinInterval, rather than one full snapshot per frame.
+            var dirty = new ConcurrentDictionary<string, ModemState>();
+            var wake = Channel.CreateBounded<bool>(
+                new BoundedChannelOptions(1) { SingleReader = true, FullMode = BoundedChannelFullMode.DropWrite });
             using var detailedTracking = stateManager.EnableDetailedFrameTracking();
-
-            // Queue initial state for all modems
-            foreach (var modem in configManager.Config.Modems)
-            {
-                var state = stateManager.GetSnapshot(modem.Id);
-                if (state != null)
-                    channel.Writer.TryWrite((modem.Id, state));
-            }
 
             void OnStateChanged(string id, ModemState state)
             {
-                channel.Writer.TryWrite((id, state));
+                dirty[id] = state;
+                wake.Writer.TryWrite(true);
             }
 
+            // Subscribe before taking the initial state, so no change falls in between
+            // (a duplicate is harmless: coalescing sends it once)
             stateManager.StateChanged += OnStateChanged;
+
+            foreach (var modem in configManager.Modems)
+            {
+                var state = stateManager.GetSnapshot(modem.Id);
+                if (state != null)
+                    OnStateChanged(modem.Id, state);
+            }
 
             try
             {
-                await foreach (var (id, state) in channel.Reader.ReadAllAsync(cancellationToken))
+                await foreach (var _ in wake.Reader.ReadAllAsync(cancellationToken))
                 {
-                    await SendSseEvent(ctx, id, state, cancellationToken);
+                    foreach (var id in dirty.Keys)
+                    {
+                        if (dirty.TryRemove(id, out var state))
+                            await SendSseEvent(ctx, id, state, cancellationToken);
+                    }
+                    await Task.Delay(SseMinInterval, cancellationToken);
                 }
             }
             catch (OperationCanceledException)
@@ -137,7 +158,7 @@ public static class WebApi
             finally
             {
                 stateManager.StateChanged -= OnStateChanged;
-                channel.Writer.TryComplete();
+                wake.Writer.TryComplete();
             }
         });
 
@@ -153,14 +174,9 @@ public static class WebApi
                 if (config.Id != id)
                     return Results.BadRequest("ID mismatch");
 
+                // The running proxy picks this up via ModemConfigChanged (restarting it if a
+                // port setting changed); parameters reach the modem only on an explicit Apply
                 configManager.UpdateModem(config);
-
-                // Update the proxy's in-memory config; excludes SETHW so NinoMode
-                // is only sent to the modem on an explicit Apply (POST .../apply).
-                if (proxyInstances.TryGetValue(id, out var proxy))
-                {
-                    proxy.UpdateConfig(config);
-                }
 
                 return Results.Ok();
             }
@@ -201,8 +217,8 @@ public static class WebApi
         {
             try
             {
+                // The runner stops the proxy and drops its state (ModemConfigChanged)
                 configManager.RemoveModem(id);
-                stateManager.Remove(id);
                 return Results.Ok();
             }
             catch (KeyNotFoundException)
@@ -380,14 +396,7 @@ public static class WebApi
 
     private static async Task SendSseEvent(HttpContext ctx, string modemId, ModemState state, CancellationToken cancellationToken)
     {
-        // Use compact JSON for SSE (no indentation) to avoid multi-line issues
-        var sseJsonOptions = new JsonSerializerOptions
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-            WriteIndented = false // Must be false for SSE single-line format
-        };
-        var json = JsonSerializer.Serialize(new { id = modemId, state }, sseJsonOptions);
+        var json = JsonSerializer.Serialize(new { id = modemId, state }, SseJsonOptions);
         await ctx.Response.WriteAsync($"data: {json}\n\n", cancellationToken);
         await ctx.Response.Body.FlushAsync(cancellationToken);
     }

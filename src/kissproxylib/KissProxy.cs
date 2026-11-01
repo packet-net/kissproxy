@@ -8,6 +8,7 @@ using NAx25;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Threading.Channels;
 using static NAx25.KissFraming;
 
 namespace kissproxylib;
@@ -26,6 +27,8 @@ public class KissProxy
     private ModemState? modemState;
     private ISerialPort? activeSerialPort;
     private Timer? parameterResendTimer;
+    private readonly object timerLock = new();
+    private Channel<(bool outbound, byte[] frame, bool emitAsBase64String)>? frameProcessingQueue;
     private readonly object serialPortLock = new();
     private readonly SemaphoreSlim serialWriteLock = new(1, 1);
     private NetworkStream? activeTcpStream;
@@ -74,7 +77,7 @@ public class KissProxy
 
         var messageBuilder = new MqttApplicationMessageBuilder()
             .WithTopic(BuildTopicName(topic))
-            .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.ExactlyOnce)
+            .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce)
             .WithPayload(payload);
 
         await mqttClient.EnqueueAsync(messageBuilder.Build());
@@ -95,7 +98,7 @@ public class KissProxy
 
         var messageBuilder = new MqttApplicationMessageBuilder()
             .WithTopic(BuildTopicName(topic))
-            .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.ExactlyOnce);
+            .WithQualityOfServiceLevel(MqttQualityOfServiceLevel.AtLeastOnce);
 
         messageBuilder = emitAsBase64String
             ? messageBuilder.WithPayload(Convert.ToBase64String(bytes.ToArray(), Base64FormattingOptions.InsertLineBreaks))
@@ -193,14 +196,20 @@ public class KissProxy
         using var scope = BeginLoggingScope();
         logger.LogDebug("Starting");
 
+        if (cancellationToken.IsCancellationRequested)
+            return;
+
         if (!string.IsNullOrWhiteSpace(mqttServer))
         {
             var (server, port) = SplitMqttServer(mqttServer);
 
             logger.LogInformation("Connecting to MQTT broker {server}:{port}...", server, port);
 
+            // Bounded, so a broker that is down for days can't grow memory without limit
             var options = new ManagedMqttClientOptionsBuilder()
                 .WithAutoReconnectDelay(TimeSpan.FromSeconds(5))
+                .WithMaxPendingMessages(10000)
+                .WithPendingMessagesOverflowStrategy(MQTTnet.Server.MqttPendingMessagesOverflowStrategy.DropOldestQueuedMessage)
                 .WithClientOptions(new MqttClientOptionsBuilder()
                     .WithClientId(LastDelimitation(Environment.MachineName, '/') + "_kissproxy_" + instance)
                     .WithTcpServer(server, port)
@@ -214,6 +223,19 @@ public class KissProxy
             mqttClient.ConnectingFailedAsync += MqttClient_ConnectingFailedAsync;
             mqttClient.DisconnectedAsync += MqttClient_DisconnectedAsync;
         }
+
+        // One ordered consumer for MQTT publishing and parameter logging, instead of a
+        // Task.Run per frame (which reordered them); bounded so a slow broker drops the oldest
+        frameProcessingQueue = Channel.CreateBounded<(bool, byte[], bool)>(
+            new BoundedChannelOptions(1000) { SingleReader = true, FullMode = BoundedChannelFullMode.DropOldest });
+        var frameProcessingTask = Task.Run(async () =>
+        {
+            await foreach (var (outbound, frame, base64) in frameProcessingQueue.Reader.ReadAllAsync())
+            {
+                try { await ProcessFrame(outbound, frame, base64); }
+                catch (Exception ex) { logger.LogError("Frame processing failed: {error}", ex.Message); }
+            }
+        });
 
         try
         {
@@ -349,7 +371,26 @@ public class KissProxy
         finally
         {
             StopParameterResendTimer();
+            frameProcessingQueue.Writer.TryComplete();
+            try { await frameProcessingTask.WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (TimeoutException) { }
+
+            // A proxy can now be stopped or restarted while the process runs; a leftover
+            // client would fight its replacement, which uses the same client id
+            if (mqttClient != null)
+            {
+                try { await mqttClient.StopAsync(); }
+                catch (Exception ex) { logger.LogWarning("Stopping MQTT client failed: {error}", ex.Message); }
+                mqttClient.Dispose();
+                mqttClient = null;
+            }
         }
+    }
+
+    private void QueueFrameProcessing(bool outbound, byte[] frame, bool emitAsBase64String)
+    {
+        if (frameProcessingQueue == null || !frameProcessingQueue.Writer.TryWrite((outbound, frame, emitAsBase64String)))
+            Task.Run(async () => await ProcessFrame(outbound, frame, emitAsBase64String));
     }
 
     private async Task<TcpClient?> AcceptTcpClientAsync(TcpListener listener, CancellationToken cancellationToken)
@@ -742,7 +783,7 @@ public class KissProxy
 
         if (ShouldProcessFrame(frame))
         {
-            Task.Run(async () => await ProcessFrame(outbound: true, frame, emitAsBase64String));
+            QueueFrameProcessing(outbound: true, frame, emitAsBase64String);
         }
     }
 
@@ -754,11 +795,7 @@ public class KissProxy
         if (currentConfig == null)
             return;
 
-        // Initialize AckModeTracker with configured values
-        if (currentConfig.NinoMode.HasValue)
-            ackModeTracker.SetMode(currentConfig.NinoMode.Value);
-        if (currentConfig.TxDelayValue.HasValue)
-            ackModeTracker.SetTxDelay(currentConfig.TxDelayValue.Value / 10);
+        UpdateAckModeTracker(currentConfig);
 
         var frames = KissFrameBuilder.BuildAllParameterFrames(currentConfig);
         foreach (var frame in frames)
@@ -830,20 +867,27 @@ public class KissProxy
         // wearing out the TNC's flash with unnecessary write cycles.
         // The mode was already sent once at connect time (SendConfiguredParametersAsync)
         // and will be re-sent whenever the user explicitly applies a config change.
-        parameterResendTimer = new Timer(_ =>
-            SendConfiguredParameters(includeSetHardware: !(currentConfig?.PersistNinoMode ?? false)),
-            null, interval, interval);
+        lock (timerLock)
+        {
+            parameterResendTimer?.Dispose();
+            parameterResendTimer = new Timer(_ =>
+                SendConfiguredParameters(includeSetHardware: !(currentConfig?.PersistNinoMode ?? false)),
+                null, interval, interval);
+        }
 
         if (currentConfig.PersistNinoMode && currentConfig.NinoMode.HasValue)
-            logger.LogInformation("Started parameter resend timer with {interval}s interval (SETHW excluded — mode is persisted to flash)", currentConfig.ParameterSendInterval);
+            logger.LogInformation("Started parameter resend timer with {interval}s interval (SETHW excluded, mode is persisted to flash)", currentConfig.ParameterSendInterval);
         else
             logger.LogInformation("Started parameter resend timer with {interval}s interval", currentConfig.ParameterSendInterval);
     }
 
     private void StopParameterResendTimer()
     {
-        parameterResendTimer?.Dispose();
-        parameterResendTimer = null;
+        lock (timerLock)
+        {
+            parameterResendTimer?.Dispose();
+            parameterResendTimer = null;
+        }
     }
 
     /// <summary>
@@ -853,6 +897,7 @@ public class KissProxy
     public void OnConfigChanged(Config newConfig)
     {
         currentConfig = newConfig;
+        UpdateAckModeTracker(newConfig);
         SendConfiguredParameters();
         RestartResendTimer();
     }
@@ -864,6 +909,18 @@ public class KissProxy
     public void UpdateConfig(Config newConfig)
     {
         currentConfig = newConfig;
+    }
+
+    /// <summary>
+    /// Keeps ACKMODE timing in step with the mode and TxDelay we send ourselves; the node's
+    /// own parameter frames update it as they pass through.
+    /// </summary>
+    private void UpdateAckModeTracker(Config config)
+    {
+        if (config.NinoMode.HasValue)
+            ackModeTracker.SetMode(config.NinoMode.Value);
+        if (config.FilterTxDelay && config.TxDelayValue.HasValue)
+            ackModeTracker.SetTxDelay(config.TxDelayValue.Value / 10);
     }
 
     private void RestartResendTimer()
@@ -972,7 +1029,7 @@ public class KissProxy
 
             if (ShouldProcessFrame(frame))
             {
-                Task.Run(async () => await ProcessFrame(outbound, frame, emitAsBase64String));
+                QueueFrameProcessing(outbound, frame, emitAsBase64String);
             }
         });
     }
