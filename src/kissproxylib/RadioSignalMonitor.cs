@@ -39,10 +39,23 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     // Tait at 9600 baud, carrier rises were reported up to 52 ms and raised readings landed up
     // to 45 ms after the NinoTNC delivered the frame. Callers attribute at least this long after
     // delivery (LinkMonitor waits 250 ms) so those readings exist.
+    // This is the default, used until the radio's own lag has been measured (see below)
     public static readonly TimeSpan LookAhead = TimeSpan.FromMilliseconds(100);
 
-    // Modes at least this fast get the look-ahead (GB7RDG: 70cm is 9600, 2m 3600)
+    // Until measured, modes at least this fast get the default look-ahead (GB7RDG: 70cm is
+    // 9600, 2m 3600)
     private const int FastModeBitRate = 4800;
+
+    // Each radio's lag is measured as it runs: for frames with just one carrier window anywhere
+    // near them, how long after delivery the radio reported the carrier rising. The look-ahead
+    // is then the 90th percentile of the last MaxLagSamples, plus a margin, for every mode; a
+    // radio that reports before delivery gets none. GB7RDG's TM8110 reports 18-36 ms before
+    // delivery, its 70cm radio up to 52 ms after.
+    private const int MaxLagSamples = 50;
+    private const int MinLagSamples = 10;
+    private static readonly TimeSpan LagMargin = TimeSpan.FromMilliseconds(30);
+    public static readonly TimeSpan MaxLookAhead = TimeSpan.FromMilliseconds(200);
+    private readonly Queue<double> riseLagsMs = new();
 
     // How long past carrier-fall a delivered frame can still belong to that window: the
     // modem's decode and serial delivery (measured 34-115 ms at 1200 baud)
@@ -123,11 +136,15 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
         {
             float? floor = noiseFloorDbm is { } nf ? (float)nf : null;
 
-            // The late-radio look-ahead only for fast modes, where a frame can be shorter than the
-            // radio's reporting lag; slow modes and unknown rates keep the original rule
-            bool fast = bitRateHz >= FastModeBitRate && airtime != null;
-            var latest = fast ? receivedAt + LookAhead : receivedAt;
-            var found = fast ? FindWindowFast(receivedAt, airtime!.Value) : FindWindow(receivedAt, airtime);
+            if (airtime is { } air)
+                LearnLag(receivedAt, air);
+
+            // With the radio's lag measured, its own look-ahead for every mode; before that, the
+            // default for fast modes only. No look-ahead, or no known airtime: packet.net's rule.
+            var lookAhead = LearnedLookAhead() ?? (bitRateHz >= FastModeBitRate ? LookAhead : TimeSpan.Zero);
+            bool ahead = lookAhead > TimeSpan.Zero && airtime != null;
+            var latest = ahead ? receivedAt + lookAhead : receivedAt;
+            var found = ahead ? FindWindowFast(receivedAt, airtime!.Value, lookAhead) : FindWindow(receivedAt, airtime);
             if (radio.Capabilities.HasFlag(RadioCapabilities.CarrierSense) && found is { } window)
             {
                 var to = window.FallAt is { } fall && fall < latest ? fall : latest;
@@ -230,15 +247,15 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     /// <summary>Our own transmitter keyed or released (from the radio's progress reports).</summary>
     public void SetTransmitting(bool keyed) => transmitting = keyed;
 
-    // Fast modes: the frame belongs to the window whose carrier carried it. A window is
-    // plausible if it rose no later than LookAhead after the frame started on air (its delivery
+    // With a look-ahead: the frame belongs to the window whose carrier carried it. A window is
+    // plausible if it rose no later than the look-ahead after the frame started on air (its delivery
     // less its airtime: a radio can report carrier late, but a carrier that rose well after the
     // frame was already on air is someone else's), and fell no more than the slack before
     // delivery. Of those, the one nearest the delivery wins: a previous station's carrier ended
     // earlier, a late-reported one of the frame's own is close.
-    private CarrierWindow? FindWindowFast(DateTime receivedAt, TimeSpan airtime)
+    private CarrierWindow? FindWindowFast(DateTime receivedAt, TimeSpan airtime, TimeSpan lookAhead)
     {
-        var latestRise = receivedAt - airtime + LookAhead;
+        var latestRise = receivedAt - airtime + lookAhead;
 
         CarrierWindow? best = null;
         var bestDistance = TimeSpan.MaxValue;
@@ -260,7 +277,7 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
         return best;
     }
 
-    // Slow modes and unknown rates (packet.net's rule): the frame belongs to the window whose
+    // Without a look-ahead (packet.net's rule): the frame belongs to the window whose
     // carrier carried it. Delivery trails carrier-fall by the modem's decode and serial
     // latency, so closed windows stay eligible for a slack, and the next station may key inside
     // it: a window that opened after the frame was already on air can't claim it.
@@ -280,6 +297,52 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
 
         bool fitsSinceTheOpenRise = airtime is { } air && receivedAt - air >= open.RiseAt;
         return closed.FallAt!.Value > open.RiseAt || fitsSinceTheOpenRise ? open : closed;
+    }
+
+    // Learns from frames with a single carrier window anywhere near them: from half a second
+    // before the frame started on air to MaxLookAhead after delivery
+    private void LearnLag(DateTime receivedAt, TimeSpan airtime)
+    {
+        var spanStart = receivedAt - airtime - TimeSpan.FromMilliseconds(500);
+        var spanEnd = receivedAt + MaxLookAhead;
+        var near = windows.Concat(currentWindow is { } c ? [c] : Array.Empty<CarrierWindow>())
+            .Where(w => w.RiseAt <= spanEnd && (w.FallAt ?? DateTime.MaxValue) >= spanStart)
+            .Take(2)
+            .ToList();
+        if (near.Count != 1)
+            return;
+
+        riseLagsMs.Enqueue((near[0].RiseAt - receivedAt).TotalMilliseconds);
+        while (riseLagsMs.Count > MaxLagSamples)
+            riseLagsMs.Dequeue();
+    }
+
+    // Null until enough frames have been measured
+    private TimeSpan? LearnedLookAhead()
+    {
+        if (riseLagsMs.Count < MinLagSamples)
+            return null;
+        var sorted = riseLagsMs.OrderBy(x => x).ToList();
+        var p90 = sorted[(int)Math.Round(0.9 * (sorted.Count - 1))];
+        if (p90 <= 0)
+            return TimeSpan.Zero;
+        var ahead = TimeSpan.FromMilliseconds(p90) + LagMargin;
+        return ahead < MaxLookAhead ? ahead : MaxLookAhead;
+    }
+
+    /// <summary>The measured carrier lag and the look-ahead it gives, for the log.</summary>
+    public string LagSummary()
+    {
+        lock (gate)
+        {
+            if (riseLagsMs.Count == 0)
+                return "carrier lag not measured yet";
+            var sorted = riseLagsMs.OrderBy(x => x).ToList();
+            var median = sorted[sorted.Count / 2];
+            var learned = LearnedLookAhead();
+            return $"carrier rise reported {median:+0;-0;0} ms from delivery (median of {sorted.Count}), "
+                + (learned is { } l ? $"look-ahead {l.TotalMilliseconds:F0} ms" : $"look-ahead not yet learned (needs {MinLagSamples})");
+        }
     }
 
     // One thread per radio doing read, record, read, record: the radio's serial link is the
@@ -315,7 +378,7 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             var now = clock();
             if (now - stats.Since >= TimeSpan.FromMinutes(1))
             {
-                try { log?.Invoke(stats.Summary(now, NoiseFloorDbm)); }
+                try { log?.Invoke($"{stats.Summary(now, NoiseFloorDbm)}; {LagSummary()}"); }
                 catch { } // logging must never stop the sampling
                 stats = new ReadStats(now);
             }
