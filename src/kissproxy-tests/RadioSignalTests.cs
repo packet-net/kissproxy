@@ -263,7 +263,7 @@ public class RadioSignalTests : IDisposable
         lock (lines)
         {
             lines.Should().NotBeEmpty();
-            lines[0].Should().MatchRegex(@"^RSSI [0-9.]+ reads/s, [0-9.]+ ms average, [0-9]+ ms worst, 0 failed, noise floor -120\.0 dBm$");
+            lines[0].Should().MatchRegex(@"^RSSI [0-9.]+ reads/s, [0-9.]+ ms average, [0-9]+ ms worst, 0 failed, noise floor -120\.0 dBm; carrier lag not measured yet$");
         }
         m.NoiseFloorDbm.Should().Be(-120);
     }
@@ -388,6 +388,55 @@ public class RadioSignalTests : IDisposable
         Carrier(delivered.AddMilliseconds(50), TimeSpan.FromMilliseconds(100), -70);
 
         monitor.Attribute(delivered, 20, null)!.RssiDbm.Should().Be(-95);
+    }
+
+    // A short frame whose carrier the radio reports riseLagMs after delivery
+    private DateTime LateFrame(DateTime delivered, double riseLagMs, float dbm)
+    {
+        radio.Busy = true;
+        monitor.OnCarrierSense(true, delivered.AddMilliseconds(riseLagMs));
+        monitor.Record(delivered.AddMilliseconds(riseLagMs + 10), dbm);
+        radio.Busy = false;
+        monitor.OnCarrierSense(false, delivered.AddMilliseconds(riseLagMs + 40));
+        return delivered;
+    }
+
+    [Fact]
+    public void LateRadio_LearnsItsLookAhead_AndUsesItAtAnyBitRate()
+    {
+        Idle(T0, TimeSpan.FromSeconds(2), -126);
+        for (int i = 0; i < 12; i++)
+        {
+            var delivered = T0.AddSeconds(3 + i * 2);
+            LateFrame(delivered, 20 + i * 3, -113); // lags 20..53 ms
+            monitor.Attribute(delivered, 15, 9600);
+        }
+        // 15 bytes at 9600 is 15 ms on air, so the lags from frame start are 35..68 ms:
+        // p90 is 65, plus 30
+        monitor.LagSummary().Should().Contain("look-ahead 95 ms");
+
+        // A longer frame on the same radio, reported just as late, isn't rejected for its airtime
+        var longer = T0.AddSeconds(40);
+        LateFrame(longer, 40, -110);
+        monitor.Attribute(longer, 128, 9600)!.RssiDbm.Should().Be(-110);
+    }
+
+    [Fact]
+    public void PromptRadio_LearnsNoLookAhead_EvenAtFastRates()
+    {
+        Idle(T0, TimeSpan.FromSeconds(2), -122);
+        for (int i = 0; i < 12; i++)
+        {
+            var delivered = T0.AddSeconds(3 + i * 2);
+            Carrier(delivered.AddMilliseconds(-150), TimeSpan.FromMilliseconds(120), -109);
+            monitor.Attribute(delivered, 15, 9600);
+        }
+        monitor.LagSummary().Should().Contain("look-ahead 0 ms");
+
+        // So a station keying 40 ms after delivery can't take a 9600 frame whose own carrier was missed
+        var delivered2 = T0.AddSeconds(40);
+        Carrier(delivered2.AddMilliseconds(40), TimeSpan.FromMilliseconds(100), -80);
+        monitor.Attribute(delivered2, 15, 9600)?.RssiDbm.Should().NotBe(-80);
     }
 
     private sealed class FakeRadio : IRadioControl
