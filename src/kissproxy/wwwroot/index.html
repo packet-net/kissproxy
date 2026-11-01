@@ -1,0 +1,1731 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KissProxy Manager</title>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --card-bg: #16213e;
+            --accent: #0f3460;
+            --highlight: #e94560;
+            --text: #eaeaea;
+            --text-muted: #888;
+            --success: #4caf50;
+            --warning: #ff9800;
+            --danger: #f44336;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+        /* Login screen */
+        #login-screen {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            gap: 20px;
+        }
+        #login-screen h1 { font-size: 2rem; margin-bottom: 10px; }
+        #login-screen input {
+            padding: 12px 20px;
+            font-size: 1rem;
+            border: 2px solid var(--accent);
+            border-radius: 8px;
+            background: var(--card-bg);
+            color: var(--text);
+            width: 300px;
+        }
+        #login-screen button {
+            padding: 12px 40px;
+            font-size: 1rem;
+            background: var(--highlight);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        #login-screen button:hover { opacity: 0.9; }
+        #login-error { color: var(--danger); display: none; }
+
+        /* Main app */
+        #app { display: none; }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 0;
+            border-bottom: 1px solid var(--accent);
+            margin-bottom: 20px;
+        }
+        header h1 { font-size: 1.5rem; }
+        .header-actions { display: flex; gap: 10px; align-items: center; }
+        .config-status {
+            padding: 5px 12px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+        }
+        .config-status.writeable { background: var(--success); color: white; }
+        .config-status.readonly { background: var(--warning); color: black; }
+
+        button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: opacity 0.2s;
+        }
+        button:hover { opacity: 0.85; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-primary { background: var(--highlight); color: white; }
+        .btn-secondary { background: var(--accent); color: white; }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-success { background: var(--success); color: white; }
+
+        /* Modem cards */
+        .modems { display: flex; flex-direction: column; gap: 20px; }
+        .modem-card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid var(--accent);
+        }
+        .modem-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .modem-title { font-size: 1.25rem; font-weight: bold; }
+        .modem-status {
+            display: flex;
+            gap: 10px;
+        }
+        .status-badge {
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: bold;
+        }
+        .status-badge.connected { background: var(--success); }
+        .status-badge.disconnected { background: var(--danger); }
+
+        /* Stats panel */
+        .stats-panel {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            background: var(--bg);
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+        .stat-item {
+            text-align: center;
+        }
+        .stat-value { font-size: 1.5rem; font-weight: bold; color: var(--highlight); }
+        .stat-label { font-size: 0.75rem; color: var(--text-muted); }
+        .stat-ago { font-size: 0.7rem; color: var(--text-muted); }
+
+        /* Last frame info */
+        .last-frame {
+            background: var(--bg);
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            font-family: monospace;
+            font-size: 0.85rem;
+        }
+        .last-frame-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            color: var(--text-muted);
+        }
+        .frame-direction { font-weight: bold; }
+        .frame-direction.to-modem { color: var(--warning); }
+        .frame-direction.from-modem { color: var(--success); }
+
+        /* Frame dump display */
+        .frame-dump {
+            margin-top: 8px;
+            padding: 8px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 4px;
+            font-size: 0.75rem;
+            overflow-x: auto;
+        }
+        .dump-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 4px;
+        }
+        .dump-header:first-child { margin-top: 0; }
+        .dump-label {
+            color: var(--text-muted);
+            font-weight: bold;
+        }
+        .copy-btn {
+            padding: 2px 8px;
+            font-size: 0.7rem;
+            background: var(--accent);
+            color: var(--text);
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        .copy-btn:hover { background: var(--highlight); }
+        .copy-btn.copied { background: var(--success); }
+        .dump-hex {
+            color: var(--highlight);
+            word-break: break-all;
+            white-space: pre-wrap;
+        }
+        .dump-ascii {
+            color: var(--success);
+            word-break: break-all;
+            white-space: pre-wrap;
+        }
+
+        /* Config sections */
+        .config-section {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid var(--accent);
+        }
+        .section-title {
+            font-size: 0.9rem;
+            font-weight: bold;
+            margin-bottom: 12px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 12px;
+        }
+        .config-field {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .config-field label {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+        .config-field input, .config-field select {
+            padding: 8px 12px;
+            border: 1px solid var(--accent);
+            border-radius: 6px;
+            background: var(--bg);
+            color: var(--text);
+            font-size: 0.9rem;
+        }
+        .config-field input:focus, .config-field select:focus {
+            outline: none;
+            border-color: var(--highlight);
+        }
+
+        /* Toggle switches */
+        .toggle-field {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .toggle {
+            position: relative;
+            width: 44px;
+            height: 24px;
+        }
+        .toggle input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: var(--accent);
+            border-radius: 24px;
+            transition: 0.3s;
+        }
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background: white;
+            border-radius: 50%;
+            transition: 0.3s;
+        }
+        .toggle input:checked + .toggle-slider {
+            background: var(--highlight);
+        }
+        .toggle input:checked + .toggle-slider:before {
+            transform: translateX(20px);
+        }
+        .toggle-label { font-size: 0.85rem; }
+
+        /* KISS params grid */
+        .kiss-params {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 15px;
+        }
+        .kiss-param {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px;
+            background: var(--bg);
+            border-radius: 8px;
+        }
+        .kiss-param input[type="number"] {
+            width: 80px;
+            background: var(--bg);
+            color: var(--text);
+            border: 1px solid var(--accent);
+            border-radius: 6px;
+            padding: 5px 8px;
+            font-size: 0.85rem;
+        }
+        .kiss-param input[type="number"]:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+        .kiss-param-unit {
+            font-size: 0.78rem;
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+
+        /* Node KISS param status panel */
+        .kiss-param-status-panel {
+            background: var(--bg);
+            border-radius: 8px;
+            padding: 12px 15px;
+            margin-bottom: 15px;
+        }
+        .kiss-param-status-title {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+        .kiss-param-status-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .kps-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(0,0,0,0.2);
+            border-radius: 6px;
+            padding: 5px 10px;
+            font-size: 0.82rem;
+        }
+        .kps-label { color: var(--text-muted); }
+        .kps-value { font-weight: bold; font-family: monospace; }
+        .kps-badge {
+            font-size: 0.7rem;
+            font-weight: bold;
+            padding: 1px 6px;
+            border-radius: 3px;
+        }
+        .kps-badge.passed { background: var(--success); color: white; }
+        .kps-badge.blocked { background: var(--danger); color: white; }
+
+        /* Footer actions */
+        .modem-actions {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid var(--accent);
+        }
+
+        /* Add modem modal */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.7);
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        .modal.active { display: flex; }
+        .modal-content {
+            background: var(--card-bg);
+            padding: 30px;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 500px;
+        }
+        .modal-title {
+            font-size: 1.25rem;
+            margin-bottom: 20px;
+        }
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        /* Toast notifications */
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 15px 25px;
+            border-radius: 8px;
+            color: white;
+            font-weight: bold;
+            transform: translateX(120%);
+            transition: transform 0.3s;
+            z-index: 2000;
+        }
+        .toast.show { transform: translateX(0); }
+        .toast.success { background: var(--success); }
+        .toast.error { background: var(--danger); }
+        .toast.warning { background: var(--warning); color: black; }
+
+        /* Unsaved changes banner */
+        .unsaved-banner {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 1500;
+            background: var(--warning);
+            color: #000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+            padding: 10px 20px;
+            font-size: 0.9rem;
+            font-weight: bold;
+            transform: translateY(-100%);
+            transition: transform 0.25s ease;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+        }
+        .unsaved-banner.show { transform: translateY(0); }
+        .unsaved-banner button {
+            background: rgba(0,0,0,0.2);
+            color: #000;
+            padding: 5px 14px;
+            font-weight: bold;
+        }
+        .unsaved-banner button:hover { background: rgba(0,0,0,0.3); }
+
+        /* Callsign warning */
+        .callsign-warning {
+            background: rgba(255, 152, 0, 0.12);
+            border: 1px solid var(--warning);
+            border-radius: 8px;
+            padding: 12px 16px;
+            font-size: 0.88rem;
+            color: var(--text);
+            margin-bottom: 20px;
+            display: none;
+        }
+        .callsign-warning strong { color: var(--warning); }
+
+        /* NinoTNC Status Panel */
+        .ninotnc-status {
+            display: none;
+            background: var(--bg);
+            border: 1px solid var(--accent);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        .ninotnc-status.active { display: block; }
+        .ninotnc-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        .ninotnc-title {
+            font-weight: bold;
+            color: var(--highlight);
+        }
+        .ninotnc-timestamp {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+        .ninotnc-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 10px;
+        }
+        .ninotnc-item {
+            background: rgba(0,0,0,0.2);
+            padding: 8px 12px;
+            border-radius: 4px;
+        }
+        .ninotnc-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .ninotnc-value {
+            font-size: 0.95rem;
+            font-weight: bold;
+            color: var(--text);
+        }
+        .ninotnc-value.highlight {
+            color: var(--highlight);
+        }
+        .ninotnc-value.success {
+            color: var(--success);
+        }
+        .setup-note {
+            background: rgba(255, 152, 0, 0.08);
+            border-left: 3px solid var(--warning);
+            border-radius: 0 4px 4px 0;
+            padding: 10px 14px;
+            font-size: 0.82rem;
+            color: var(--text-muted);
+            line-height: 1.6;
+            margin-bottom: 12px;
+        }
+        .setup-note strong { color: var(--warning); }
+        .setup-note ul { margin: 4px 0 0 16px; }
+        .setup-note li { margin-bottom: 2px; }
+
+        /* Collapsible sections */
+        .collapsible-header {
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            user-select: none;
+        }
+        .collapsible-header:hover .section-title { color: var(--text); }
+        .collapsible-arrow {
+            font-size: 0.7rem;
+            transition: transform 0.2s;
+            color: var(--text-muted);
+        }
+        .collapsible-arrow.open { transform: rotate(90deg); }
+        .collapsible-content { display: none; }
+        .collapsible-content.open { display: block; }
+
+        /* Software control warning */
+        .sw-control-warning {
+            background: rgba(244, 67, 54, 0.12);
+            border-left: 3px solid var(--danger);
+            border-radius: 0 4px 4px 0;
+            padding: 8px 12px;
+            font-size: 0.82rem;
+            color: var(--danger);
+            margin-bottom: 10px;
+            display: none;
+        }
+        .sw-control-warning.show { display: block; }
+    </style>
+</head>
+<body>
+    <!-- Login Screen -->
+    <div id="login-screen">
+        <h1>KissProxy Manager</h1>
+        <input type="password" id="password-input" placeholder="Enter password" autocomplete="current-password">
+        <button onclick="login()">Login</button>
+        <div id="login-error">Invalid password</div>
+    </div>
+
+    <!-- Unsaved changes banner (fixed, slides down from top) -->
+    <div class="unsaved-banner" id="unsaved-banner">
+        Unsaved changes
+        <button onclick="saveConfig()">Save Config</button>
+    </div>
+
+    <!-- Main App -->
+    <div id="app" class="container">
+        <header>
+            <h1>KissProxy Manager</h1>
+            <div class="header-actions">
+                <span class="config-status" id="config-status">Checking...</span>
+                <button class="btn-primary" id="save-btn" onclick="saveConfig()">Save Config</button>
+                <button class="btn-secondary" onclick="showAddModem()">Add Modem</button>
+            </div>
+        </header>
+
+        <!-- Callsign warning -->
+        <div class="callsign-warning" id="callsign-warning">
+            <strong>My Callsign is not set.</strong> Test transmissions are disabled until a callsign is configured.
+            It will be auto-detected from the next data frame sent by the node.
+        </div>
+
+        <div class="modem-card" id="no-modems-panel" style="display: none; text-align: center; padding: 40px 20px;">
+            <div style="font-size: 2rem; margin-bottom: 15px; color: var(--text-muted);">&#128246;</div>
+            <div style="font-size: 1.1rem; font-weight: bold; margin-bottom: 10px;">No modems configured</div>
+            <div style="color: var(--text-muted); font-size: 0.9rem; line-height: 1.7; max-width: 480px; margin: 0 auto 20px;">
+                Click <strong>Add Modem</strong> in the top right to get started.<br>
+                You'll need the serial port your TNC is connected to and a TCP port for KISS clients to connect on.
+            </div>
+            <button class="btn-primary" onclick="showAddModem()">Add Modem</button>
+        </div>
+
+        <div class="modems" id="modems-container">
+            <!-- Modem cards will be inserted here -->
+        </div>
+
+        <!-- Test Transmission (shown only when My Callsign is set and modems exist) -->
+        <div class="modem-card" id="test-transmission" style="margin-top: 20px; display: none;">
+            <div class="modem-header">
+                <span class="modem-title">Test Transmission</span>
+            </div>
+            <div class="config-grid">
+                <div class="config-field">
+                    <label>To Callsign</label>
+                    <input type="text" id="tx-to-callsign" value="CQ" style="text-transform: uppercase">
+                </div>
+                <div class="config-field">
+                    <label>Modem</label>
+                    <select id="tx-modem-select">
+                        <option value="">Select modem...</option>
+                    </select>
+                </div>
+                <div class="config-field" style="grid-column: 1 / -1;">
+                    <label>Message</label>
+                    <textarea id="tx-message" rows="3" placeholder="Enter test message" style="width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--accent); border-radius: 6px; padding: 8px; font-family: inherit; resize: vertical;"></textarea>
+                </div>
+                <div class="config-field">
+                    <button class="btn-primary" onclick="sendTestTransmission()">Send</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Global Settings -->
+        <div class="modem-card" id="global-settings" style="margin-top: 20px;">
+            <div class="collapsible-header" onclick="toggleSection(this)" style="padding: 0;">
+                <span class="modem-title">Global Settings</span>
+                <span class="collapsible-arrow">&#9654;</span>
+            </div>
+            <div class="collapsible-content">
+                <div class="config-grid" style="margin-top: 15px;">
+                    <div class="config-field">
+                        <label>Web UI Password</label>
+                        <input type="password" id="global-password" placeholder="Enter new password" onchange="updateGlobalConfig('password', this.value)">
+                    </div>
+                    <div class="config-field">
+                        <label>My Callsign</label>
+                        <input type="text" id="global-mycallsign" placeholder="e.g. VK2ABC" style="text-transform: uppercase" onchange="updateGlobalConfig('myCallsign', this.value.toUpperCase().trim())">
+                    </div>
+                    <div class="config-field">
+                        <label>MQTT Server</label>
+                        <input type="text" id="global-mqtt-server" placeholder="host:port" onchange="updateGlobalConfig('mqttServer', this.value)">
+                    </div>
+                    <div class="config-field">
+                        <label>MQTT Username</label>
+                        <input type="text" id="global-mqtt-username" onchange="updateGlobalConfig('mqttUsername', this.value)">
+                    </div>
+                    <div class="config-field">
+                        <label>MQTT Password</label>
+                        <input type="password" id="global-mqtt-password" placeholder="Enter new password" onchange="updateGlobalConfig('mqttPassword', this.value)">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Modem Modal -->
+    <div class="modal" id="add-modem-modal">
+        <div class="modal-content">
+            <h2 class="modal-title">Add New Modem</h2>
+            <div class="config-grid">
+                <div class="config-field">
+                    <label>Modem ID</label>
+                    <input type="text" id="new-modem-id" placeholder="e.g. 2m, 70cm">
+                </div>
+                <div class="config-field">
+                    <label>Serial Port</label>
+                    <select id="new-modem-port">
+                        <option value="">Loading...</option>
+                    </select>
+                </div>
+                <div class="config-field">
+                    <label>Baud Rate</label>
+                    <input type="number" id="new-modem-baud" value="57600">
+                </div>
+                <div class="config-field">
+                    <label>TCP Port</label>
+                    <input type="number" id="new-modem-tcpport" value="8910">
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="hideAddModem()">Cancel</button>
+                <button class="btn-primary" onclick="addModem()">Add Modem</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast"></div>
+
+    <script>
+        let authToken = '';
+        let modems = [];
+        let ninoModes = [];
+        let serialPorts = [];
+        let globalConfig = {};
+        let tcpPortHighWaterMark = 8909; // Tracks the highest TCP port ever seen/added this session
+        const collapsedModems = new Set(); // Tracks which modem cards are collapsed
+        let appliedModes = {};  // Track modes applied via UI (modemId -> modeNum)
+        let configWriteable = false;
+        let hasUnsavedChanges = false;
+        let eventSource = null;
+
+        // API helper
+        async function api(method, path, body = null) {
+            const opts = {
+                method,
+                headers: {
+                    'Authorization': `Bearer ${authToken}`,
+                    'Content-Type': 'application/json'
+                }
+            };
+            if (body) opts.body = JSON.stringify(body);
+
+            const res = await fetch(`/api${path}`, opts);
+            if (res.status === 401) {
+                showLogin();
+                throw new Error('Unauthorized');
+            }
+            if (!res.ok) {
+                const text = await res.text();
+                throw new Error(text || res.statusText);
+            }
+            const contentType = res.headers.get('content-type');
+            if (contentType && contentType.includes('application/json')) {
+                return res.json();
+            }
+            return null;
+        }
+
+        // Login
+        async function login() {
+            const password = document.getElementById('password-input').value;
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${password}` }
+                });
+                if (res.ok) {
+                    authToken = password;
+                    localStorage.setItem('kissproxy-token', password);
+                    showApp();
+                } else {
+                    document.getElementById('login-error').style.display = 'block';
+                }
+            } catch (e) {
+                document.getElementById('login-error').style.display = 'block';
+            }
+        }
+
+        function showLogin() {
+            document.getElementById('login-screen').style.display = 'flex';
+            document.getElementById('app').style.display = 'none';
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+        }
+
+        async function showApp() {
+            document.getElementById('login-screen').style.display = 'none';
+            document.getElementById('app').style.display = 'block';
+
+            // Load initial data
+            await loadConfigStatus();
+            await loadGlobalConfig();
+            await loadNinoModes();
+            await loadSerialPorts();
+            await loadModems();
+
+            // Connect to real-time stats stream
+            connectStatsStream();
+
+            // Update "ago" times every second
+            setInterval(updateAgoTimes, 1000);
+        }
+
+        async function loadConfigStatus() {
+            try {
+                const status = await api('GET', '/config-status');
+                configWriteable = status.writeable;
+                const el = document.getElementById('config-status');
+                el.textContent = status.writeable ? 'Writeable' : 'Read-only';
+                el.className = `config-status ${status.writeable ? 'writeable' : 'readonly'}`;
+                document.getElementById('save-btn').disabled = !status.writeable;
+            } catch (e) {
+                console.error('Failed to load config status:', e);
+            }
+        }
+
+        async function loadGlobalConfig() {
+            try {
+                globalConfig = await api('GET', '/global');
+                // Populate global settings fields
+                document.getElementById('global-mycallsign').value = globalConfig.myCallsign || '';
+                document.getElementById('global-mqtt-server').value = globalConfig.mqttServer || '';
+                document.getElementById('global-mqtt-username').value = globalConfig.mqttUsername || '';
+                // Password fields are not populated (security)
+                document.getElementById('global-password').placeholder = globalConfig.hasPassword ? 'Password set (enter to change)' : 'Enter password';
+                document.getElementById('global-mqtt-password').placeholder = globalConfig.hasMqttPassword ? 'Password set (enter to change)' : 'Enter password';
+                updateTestTransmissionVisibility();
+                updateCallsignWarning();
+                updateMqttPerModemVisibility();
+            } catch (e) {
+                console.error('Failed to load global config:', e);
+            }
+        }
+
+        function updateCallsignWarning() {
+            const warn = document.getElementById('callsign-warning');
+            if (warn) warn.style.display = globalConfig.myCallsign ? 'none' : '';
+        }
+
+        async function updateGlobalConfig(key, value) {
+            hasUnsavedChanges = true;
+            document.getElementById('unsaved-banner').classList.add('show');
+
+            try {
+                const update = {};
+                if (value === '' || value === null) {
+                    // Clear the field
+                    update['clear' + key.charAt(0).toUpperCase() + key.slice(1)] = true;
+                } else {
+                    update[key] = value;
+                }
+                await api('PUT', '/global', update);
+
+                // If password was changed, update the auth token
+                if (key === 'password' && value) {
+                    authToken = value;
+                    localStorage.setItem('kissproxy-token', value);
+                    showToast('Password updated. Using new password for this session.', 'success');
+                }
+
+                // Keep local globalConfig in sync for visibility checks
+                if (key === 'myCallsign') {
+                    globalConfig.myCallsign = value || null;
+                    updateTestTransmissionVisibility();
+                    updateCallsignWarning();
+                }
+                if (key === 'mqttServer') {
+                    globalConfig.mqttServer = value || null;
+                    updateMqttPerModemVisibility();
+                }
+            } catch (e) {
+                showToast('Failed to update global config: ' + e.message, 'error');
+            }
+        }
+
+        // --- Test Transmission ---
+
+        function updateTestTransmissionVisibility() {
+            const card = document.getElementById('test-transmission');
+            if (globalConfig.myCallsign && modems.length > 0) {
+                card.style.display = '';
+            } else {
+                card.style.display = 'none';
+            }
+        }
+
+        function updateMqttPerModemVisibility() {
+            const show = !!(globalConfig.mqttServer);
+            document.querySelectorAll('.mqtt-per-modem').forEach(el => {
+                el.style.display = show ? '' : 'none';
+            });
+        }
+
+        function populateModemDropdown() {
+            const select = document.getElementById('tx-modem-select');
+            const currentValue = select.value;
+            select.innerHTML = '<option value="">Select modem...</option>';
+            modems.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m.config.id;
+                opt.textContent = m.config.id;
+                select.appendChild(opt);
+            });
+            // Restore previous selection if still valid
+            if (currentValue && modems.some(m => m.config.id === currentValue)) {
+                select.value = currentValue;
+            }
+        }
+
+        async function sendTestTransmission() {
+            const toCallsign = document.getElementById('tx-to-callsign').value.trim().toUpperCase() || 'CQ';
+            const message = document.getElementById('tx-message').value;
+            const modemId = document.getElementById('tx-modem-select').value;
+
+            if (!modemId) {
+                showToast('Please select a modem', 'error');
+                return;
+            }
+            if (!message) {
+                showToast('Please enter a message', 'error');
+                return;
+            }
+
+            try {
+                const result = await api('POST', `/modems/${modemId}/transmit`, {
+                    toCallsign: toCallsign,
+                    message: message
+                });
+                showToast('Transmission sent', 'success');
+            } catch (e) {
+                showToast('Transmit failed: ' + e.message, 'error');
+            }
+        }
+
+        async function loadNinoModes() {
+            try {
+                ninoModes = await api('GET', '/nino-modes');
+            } catch (e) {
+                console.error('Failed to load NinoTNC modes:', e);
+            }
+        }
+
+        async function loadSerialPorts() {
+            try {
+                serialPorts = await api('GET', '/serial-ports');
+            } catch (e) {
+                console.error('Failed to load serial ports:', e);
+            }
+        }
+
+        async function loadModems() {
+            try {
+                modems = await api('GET', '/modems');
+                // Keep the high-water mark up to date with whatever is in the config
+                const maxLoaded = modems.reduce((max, m) => Math.max(max, m.config.tcpPort || 0), 0);
+                tcpPortHighWaterMark = Math.max(tcpPortHighWaterMark, maxLoaded);
+                renderModems();
+                // Apply already-fetched state immediately so panels (e.g. NinoTNC status)
+                // are visible without waiting for the first SSE event.
+                for (const modem of modems) {
+                    if (modem.state) updateModemStats(modem.config.id, modem.state);
+                }
+                populateModemDropdown();
+                updateTestTransmissionVisibility();
+            } catch (e) {
+                console.error('Failed to load modems:', e);
+            }
+        }
+
+        function connectStatsStream() {
+            // Close existing connection if any
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            // Create EventSource with auth token as query parameter (EventSource doesn't support headers)
+            const url = `/api/modems/stream?token=${encodeURIComponent(authToken)}`;
+            eventSource = new EventSource(url);
+
+            eventSource.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    updateModemStats(data.id, data.state);
+                } catch (e) {
+                    console.error('Failed to parse SSE data:', e);
+                }
+            };
+
+            eventSource.onerror = (error) => {
+                console.error('SSE connection error:', error);
+                // EventSource will automatically reconnect
+            };
+
+            eventSource.onopen = () => {
+                console.log('SSE connection established');
+            };
+        }
+
+        function updateModemStats(id, stats) {
+            const card = document.querySelector(`[data-modem-id="${id}"]`);
+            if (!card) return;
+
+            // Update NinoTNC status first (independent of other updates)
+            if (stats.ninoTncStatus) {
+                updateNinoTncStatus(id, stats.ninoTncStatus);
+            }
+
+            // Update connection status
+            const nodeStatus = card.querySelector('.node-status');
+            const serialStatus = card.querySelector('.serial-status');
+            if (nodeStatus) {
+                nodeStatus.textContent = stats.nodeConnected ? 'Node Connected' : 'Node Disconnected';
+                nodeStatus.className = `status-badge ${stats.nodeConnected ? 'connected' : 'disconnected'}`;
+            }
+            if (serialStatus) {
+                serialStatus.textContent = stats.serialOpen ? 'Serial Open' : 'Serial Closed';
+                serialStatus.className = `status-badge ${stats.serialOpen ? 'connected' : 'disconnected'}`;
+            }
+
+            // Update stats
+            const updateStat = (selector, value) => {
+                const el = card.querySelector(selector);
+                if (el) el.textContent = value;
+            };
+
+            updateStat('.stat-frames-to', stats.framesToModem || 0);
+            updateStat('.stat-frames-from', stats.framesFromModem || 0);
+            updateStat('.stat-data-to', stats.dataFramesToModem || 0);
+            updateStat('.stat-data-from', stats.dataFramesFromModem || 0);
+            updateStat('.stat-filtered', stats.framesFiltered || 0);
+            updateStat('.stat-bytes-to', formatBytes(stats.bytesToModem || 0));
+            updateStat('.stat-bytes-from', formatBytes(stats.bytesFromModem || 0));
+
+            // Store timestamps for ago updates
+            card.dataset.lastToModem = stats.lastFrameToModem || '';
+            card.dataset.lastFromModem = stats.lastFrameFromModem || '';
+            card.dataset.lastDataToModem = stats.lastDataFrameToModem || '';
+            card.dataset.lastDataFromModem = stats.lastDataFrameFromModem || '';
+
+            // Update last frame info
+            if (stats.lastFrameToModemInfo) {
+                updateLastFrameInfo(card, 'to', stats.lastFrameToModemInfo);
+                // Auto-detect callsign from node's outbound data frames
+                if (!globalConfig.myCallsign && stats.lastFrameToModemInfo.sourceCallsign) {
+                    const detected = stats.lastFrameToModemInfo.sourceCallsign;
+                    globalConfig.myCallsign = detected;
+                    document.getElementById('global-mycallsign').value = detected;
+                    updateGlobalConfig('myCallsign', detected);
+                    showToast(`Callsign auto-detected: ${detected}`, 'success');
+                }
+            }
+            if (stats.lastFrameFromModemInfo) {
+                updateLastFrameInfo(card, 'from', stats.lastFrameFromModemInfo);
+            }
+
+            // Update KISS param status panel
+            updateKissParamStatusPanel(card, stats);
+
+            // Update NinoTNC status if available
+            if (stats.ninoTncStatus) {
+                updateNinoTncStatus(id, stats.ninoTncStatus);
+            }
+        }
+
+        function updateKissParamStatusPanel(card, stats) {
+            const panel = card.querySelector('[id^="kps-"]');
+            if (!panel) return;
+
+            const params = [
+                { key: 'lastNodeTxDelay',     cls: 'txdelay',     label: 'TxDelay',     fmt: v => `${v * 10}ms` },
+                { key: 'lastNodePersistence', cls: 'persistence', label: 'Persistence', fmt: v => `${v}` },
+                { key: 'lastNodeSlotTime',    cls: 'slottime',    label: 'Slot Time',   fmt: v => `${v * 10}ms` },
+                { key: 'lastNodeTxTail',      cls: 'txtail',      label: 'TxTail',      fmt: v => `${v * 10}ms` },
+                { key: 'lastNodeSetHw',       cls: 'sethw',       label: 'SETHW',       fmt: v => `mode ${v & 0x0F}` },
+            ];
+
+            let anyVisible = false;
+            for (const p of params) {
+                const s = stats[p.key];
+                const item = panel.querySelector(`.kps-item-${p.cls}`);
+                if (!item) continue;
+                if (s == null) continue;
+
+                item.style.display = '';
+                anyVisible = true;
+                item.querySelector(`.kps-v-${p.cls}`).textContent = p.fmt(s.value);
+                const badge = item.querySelector(`.kps-b-${p.cls}`);
+                badge.textContent = s.filtered ? 'Blocked' : 'Passed';
+                badge.className = `kps-badge ${s.filtered ? 'blocked' : 'passed'}`;
+            }
+
+            panel.style.display = anyVisible ? '' : 'none';
+        }
+
+        function updateNinoTncStatus(id, status) {
+            const panel = document.getElementById(`ninotnc-${id}`);
+            if (!panel) return;
+
+            panel.classList.add('active');
+
+            const setValue = (selector, value) => {
+                const el = panel.querySelector(selector);
+                if (el) el.textContent = value ?? '-';
+            };
+
+            const setHtml = (selector, html) => {
+                const el = panel.querySelector(selector);
+                if (el) el.innerHTML = html ?? '-';
+            };
+
+            setValue('.ninotnc-firmware', status.firmwareVersion);
+
+            // Check if under software control (DIP switches = 1111)
+            const isSoftwareControl = status.boardSwitchModeBinary === '1111';
+
+            // Flag when not in software control mode
+            const swWarning = panel.querySelector('.sw-control-warning');
+            if (swWarning) swWarning.classList.toggle('show', !isSoftwareControl);
+
+            // Check if we have an applied mode from UI that should override display
+            const appliedMode = appliedModes[id];
+            const hasAppliedMode = appliedMode !== null && appliedMode !== undefined;
+
+            // If TX Test confirms our applied mode, clear the tracking
+            if (hasAppliedMode && status.currentMode === appliedMode) {
+                delete appliedModes[id];
+            }
+
+            // Use applied mode if set, otherwise use TX Test data
+            if (hasAppliedMode && appliedModes[id] !== undefined) {
+                // Show applied mode with indicator
+                const modeInfo = ninoModes.find(m => m.mode === appliedMode);
+                const modeName = modeInfo ? modeInfo.name : `Mode ${appliedMode}`;
+                const equivSwitch = appliedMode.toString(2).padStart(4, '0');
+                setHtml('.ninotnc-mode', `${modeName} <span style="font-size:0.7rem;color:var(--warning)">(via KISS = ${appliedMode} / ${equivSwitch})</span>`);
+                setValue('.ninotnc-switches', isSoftwareControl ? '[1111] Software Control' : (status.boardSwitchModeBinary ? `[${status.boardSwitchModeBinary}]` : '-'));
+            } else if (isSoftwareControl) {
+                // Show mode with software control indicator and equivalent switch position
+                const modeName = status.currentModeName || (status.currentMode !== null ? `Mode ${status.currentMode}` : 'Unknown');
+                const modeNum = status.currentMode ?? '?';
+                const equivSwitch = modeNum !== '?' ? modeNum.toString(2).padStart(4, '0') : '????';
+                setHtml('.ninotnc-mode', `${modeName} <span style="font-size:0.7rem;color:var(--warning)">(via KISS = ${modeNum} / ${equivSwitch})</span>`);
+                setValue('.ninotnc-switches', '[1111] Software Control');
+            } else {
+                setValue('.ninotnc-mode', status.currentModeName || (status.currentMode !== null ? `Mode ${status.currentMode}` : '-'));
+                setValue('.ninotnc-switches', status.boardSwitchModeBinary ? `[${status.boardSwitchModeBinary}]` : '-');
+            }
+            setValue('.ninotnc-uptime', status.uptimeFormatted);
+            setValue('.ninotnc-ax25rx', status.ax25RxPackets?.toLocaleString());
+            setValue('.ninotnc-il2prx', status.il2pRxPackets?.toLocaleString());
+            setValue('.ninotnc-il2puncr', status.il2pRxUncorrectable?.toLocaleString());
+            setValue('.ninotnc-txpkt', status.txPacketCount?.toLocaleString());
+            setValue('.ninotnc-serial', status.serialNumber);
+
+            // Update timestamp
+            if (status.timestamp) {
+                const ts = new Date(status.timestamp);
+                setValue('.ninotnc-ts', formatAgo(ts));
+            }
+
+            // Pre-select the current effective mode in the dropdown (mode 15 = DIP-only, skip)
+            if (status.currentMode !== null && status.currentMode !== undefined && status.currentMode !== 15) {
+                const card = document.querySelector(`[data-modem-id="${id}"]`);
+                const select = card?.querySelector('.nino-mode-select');
+                if (select && select.value !== String(status.currentMode)) {
+                    select.value = String(status.currentMode);
+                    // Sync in-memory config and API silently — this is telemetry-driven,
+                    // not a user action, so don't mark unsaved changes.
+                    const modem = modems.find(m => m.config.id === id);
+                    if (modem) {
+                        modem.config.ninoMode = status.currentMode;
+                        api('PUT', `/modems/${id}`, modem.config).catch(() => {});
+                    }
+                }
+            }
+        }
+
+        function updateLastFrameInfo(card, direction, info) {
+            const el = card.querySelector(`.last-frame-${direction}`);
+            if (!el) return;
+
+            let html = `<span class="frame-direction ${direction === 'to' ? 'to-modem' : 'from-modem'}">${direction === 'to' ? 'To Modem' : 'From Modem'}</span>`;
+            html += ` | ${info.commandName} | Port ${info.port} | ${info.payloadLength} bytes`;
+
+            if (info.parameterValue !== null && info.parameterValue !== undefined) {
+                html += ` | Value: ${info.parameterValue}`;
+            }
+            if (info.decodedDescription) {
+                html += `<br><span style="color: var(--text-muted)">${info.decodedDescription}</span>`;
+            }
+
+            // Add hex and ASCII dumps for received frames
+            if (direction === 'from' && info.hexDump) {
+                const hexId = `hex-${card.dataset.modemId}-${Date.now()}`;
+                html += `<div class="frame-dump">`;
+                html += `<div class="dump-header"><span class="dump-label">Hex:</span><button class="copy-btn" onclick="copyHexDump('${hexId}', this)">Copy</button></div>`;
+                html += `<div class="dump-hex" id="${hexId}">${escapeHtml(info.hexDump)}</div>`;
+                if (info.asciiDump) {
+                    html += `<div class="dump-header"><span class="dump-label">ASCII:</span></div>`;
+                    html += `<div class="dump-ascii">${escapeHtml(info.asciiDump)}</div>`;
+                }
+                html += `</div>`;
+            }
+
+            el.innerHTML = html;
+        }
+
+        function copyHexDump(elementId, button) {
+            const el = document.getElementById(elementId);
+            if (!el) return;
+
+            const text = el.textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                button.textContent = 'Copied!';
+                button.classList.add('copied');
+                setTimeout(() => {
+                    button.textContent = 'Copy';
+                    button.classList.remove('copied');
+                }, 2000);
+            }).catch(err => {
+                console.error('Failed to copy:', err);
+            });
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function updateAgoTimes() {
+            document.querySelectorAll('[data-modem-id]').forEach(card => {
+                const lastTo = card.dataset.lastToModem;
+                const lastFrom = card.dataset.lastFromModem;
+                const lastDataTo = card.dataset.lastDataToModem;
+                const lastDataFrom = card.dataset.lastDataFromModem;
+
+                const updateAgo = (selector, timestamp) => {
+                    const el = card.querySelector(selector);
+                    if (el && timestamp) {
+                        el.textContent = formatAgo(new Date(timestamp));
+                    }
+                };
+
+                updateAgo('.ago-to', lastTo);
+                updateAgo('.ago-from', lastFrom);
+                updateAgo('.ago-data-to', lastDataTo);
+                updateAgo('.ago-data-from', lastDataFrom);
+            });
+        }
+
+        function formatAgo(date) {
+            if (!date || isNaN(date.getTime())) return 'never';
+            const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+            if (seconds < 5) return 'just now';
+            if (seconds < 60) return `${seconds}s ago`;
+            if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+            return `${Math.floor(seconds / 3600)}h ago`;
+        }
+
+        function formatBytes(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / 1048576).toFixed(1) + ' MB';
+        }
+
+        function renderModems() {
+            const container = document.getElementById('modems-container');
+            container.innerHTML = modems.map(m => renderModemCard(m)).join('');
+            updateMqttPerModemVisibility();
+            document.getElementById('no-modems-panel').style.display = modems.length === 0 ? '' : 'none';
+        }
+
+        function renderModemCard(modem) {
+            const c = modem.config;
+            const s = modem.state || {};
+
+            const collapsed = collapsedModems.has(c.id);
+            return `
+                <div class="modem-card" data-modem-id="${c.id}">
+                    <div class="modem-header" onclick="toggleModemCollapse('${c.id}')" style="cursor:pointer; user-select:none; margin-bottom:${collapsed ? '0' : '15px'};">
+                        <div style="display:flex; align-items:center; gap:10px;">
+                            <span class="collapsible-arrow ${collapsed ? '' : 'open'}">&#9654;</span>
+                            <span class="modem-title">${c.id}</span>
+                        </div>
+                        <div class="modem-status">
+                            <span class="status-badge node-status ${s.nodeConnected ? 'connected' : 'disconnected'}">
+                                ${s.nodeConnected ? 'Node Connected' : 'Node Disconnected'}
+                            </span>
+                            <span class="status-badge serial-status ${s.serialOpen ? 'connected' : 'disconnected'}">
+                                ${s.serialOpen ? 'Serial Open' : 'Serial Closed'}
+                            </span>
+                        </div>
+                    </div>
+
+                    <div class="${collapsed ? '' : 'open'} collapsible-content">
+                    <div class="stats-panel">
+                        <div class="stat-item">
+                            <div class="stat-value stat-frames-to">${s.framesToModem || 0}</div>
+                            <div class="stat-label">Frames To Modem</div>
+                            <div class="stat-ago ago-to">${formatAgo(s.lastFrameToModem ? new Date(s.lastFrameToModem) : null)}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value stat-frames-from">${s.framesFromModem || 0}</div>
+                            <div class="stat-label">Frames From Modem</div>
+                            <div class="stat-ago ago-from">${formatAgo(s.lastFrameFromModem ? new Date(s.lastFrameFromModem) : null)}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value stat-data-to">${s.dataFramesToModem || 0}</div>
+                            <div class="stat-label">Node Tx Frames</div>
+                            <div class="stat-ago ago-data-to">${formatAgo(s.lastDataFrameToModem ? new Date(s.lastDataFrameToModem) : null)}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value stat-data-from">${s.dataFramesFromModem || 0}</div>
+                            <div class="stat-label">Heard On Air</div>
+                            <div class="stat-ago ago-data-from">${formatAgo(s.lastDataFrameFromModem ? new Date(s.lastDataFrameFromModem) : null)}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value stat-filtered">${s.framesFiltered || 0}</div>
+                            <div class="stat-label">Filtered</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value stat-bytes-to">${formatBytes(s.bytesToModem || 0)}</div>
+                            <div class="stat-label">Bytes To</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value stat-bytes-from">${formatBytes(s.bytesFromModem || 0)}</div>
+                            <div class="stat-label">Bytes From</div>
+                        </div>
+                    </div>
+
+                    <div class="kiss-param-status-panel" id="kps-${c.id}" style="display:none;">
+                        <div class="kiss-param-status-title">KISS Parameters from Node</div>
+                        <div class="kiss-param-status-grid">
+                            <div class="kps-item kps-item-txdelay" style="display:none;">
+                                <span class="kps-label">TxDelay</span>
+                                <span class="kps-value kps-v-txdelay">-</span>
+                                <span class="kps-badge kps-b-txdelay">-</span>
+                            </div>
+                            <div class="kps-item kps-item-persistence" style="display:none;">
+                                <span class="kps-label">Persistence</span>
+                                <span class="kps-value kps-v-persistence">-</span>
+                                <span class="kps-badge kps-b-persistence">-</span>
+                            </div>
+                            <div class="kps-item kps-item-slottime" style="display:none;">
+                                <span class="kps-label">Slot Time</span>
+                                <span class="kps-value kps-v-slottime">-</span>
+                                <span class="kps-badge kps-b-slottime">-</span>
+                            </div>
+                            <div class="kps-item kps-item-txtail" style="display:none;">
+                                <span class="kps-label">TxTail</span>
+                                <span class="kps-value kps-v-txtail">-</span>
+                                <span class="kps-badge kps-b-txtail">-</span>
+                            </div>
+                            <div class="kps-item kps-item-sethw" style="display:none;">
+                                <span class="kps-label">SETHW</span>
+                                <span class="kps-value kps-v-sethw">-</span>
+                                <span class="kps-badge kps-b-sethw">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="last-frame">
+                        <div class="last-frame-header">Last Frame Activity</div>
+                        <div class="last-frame-to">No frames yet</div>
+                        <div class="last-frame-from" style="margin-top: 5px;">No frames yet</div>
+                    </div>
+
+                    <div class="ninotnc-status" id="ninotnc-${c.id}">
+                        <div class="ninotnc-header">
+                            <span class="ninotnc-title">NinoTNC Status (TX Test)</span>
+                            <span class="ninotnc-timestamp ninotnc-ts"></span>
+                        </div>
+                        <div class="sw-control-warning">&#9888; DIP switches are not set to 1111 &mdash; modem is not in software control mode. Set Mode DIP switches to 1111 to enable software control.</div>
+                        <div class="ninotnc-grid">
+                            <div class="ninotnc-item">
+                                <div class="ninotnc-label">Firmware</div>
+                                <div class="ninotnc-value ninotnc-firmware">-</div>
+                            </div>
+                            <div class="ninotnc-item">
+                                <div class="ninotnc-label">Current Mode</div>
+                                <div class="ninotnc-value highlight ninotnc-mode">-</div>
+                            </div>
+                            <div class="ninotnc-item">
+                                <div class="ninotnc-label">DIP Switches</div>
+                                <div class="ninotnc-value ninotnc-switches">-</div>
+                            </div>
+                            <div class="ninotnc-item">
+                                <div class="ninotnc-label">Uptime</div>
+                                <div class="ninotnc-value ninotnc-uptime">-</div>
+                            </div>
+                            <div class="ninotnc-item">
+                                <div class="ninotnc-label">AX.25 RX Packets</div>
+                                <div class="ninotnc-value ninotnc-ax25rx">-</div>
+                            </div>
+                            <div class="ninotnc-item">
+                                <div class="ninotnc-label">IL2P RX Packets</div>
+                                <div class="ninotnc-value ninotnc-il2prx">-</div>
+                            </div>
+                            <div class="ninotnc-item">
+                                <div class="ninotnc-label">IL2P Uncorrectable</div>
+                                <div class="ninotnc-value ninotnc-il2puncr">-</div>
+                            </div>
+                            <div class="ninotnc-item">
+                                <div class="ninotnc-label">TX Packets</div>
+                                <div class="ninotnc-value ninotnc-txpkt">-</div>
+                            </div>
+                            <div class="ninotnc-item">
+                                <div class="ninotnc-label">Serial Number</div>
+                                <div class="ninotnc-value ninotnc-serial">-</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="config-section">
+                        <div class="collapsible-header" onclick="toggleSection(this)">
+                            <span class="section-title">Connection Settings</span>
+                            <span class="collapsible-arrow">&#9654;</span>
+                        </div>
+                        <div class="collapsible-content">
+                            <div class="config-grid" style="margin-top: 12px;">
+                                <div class="config-field">
+                                    <label>Serial Port</label>
+                                    <select onchange="updateConfig('${c.id}', 'comPort', this.value)">
+                                        ${serialPorts.map(p => `<option value="${p.path}" ${c.comPort === p.path ? 'selected' : ''}>${p.displayName}</option>`).join('')}
+                                        <option value="${c.comPort}" ${!serialPorts.find(p => p.path === c.comPort) ? 'selected' : ''}>${c.comPort}</option>
+                                    </select>
+                                </div>
+                                <div class="config-field">
+                                    <label>Baud Rate</label>
+                                    <input type="number" value="${c.baud}" onchange="updateConfig('${c.id}', 'baud', parseInt(this.value))">
+                                </div>
+                                <div class="config-field">
+                                    <label>TCP Port</label>
+                                    <input type="number" value="${c.tcpPort}" onchange="updateConfig('${c.id}', 'tcpPort', parseInt(this.value))">
+                                </div>
+                                <div class="toggle-field">
+                                    <label class="toggle">
+                                        <input type="checkbox" ${c.anyHost ? 'checked' : ''} onchange="updateConfig('${c.id}', 'anyHost', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                    <span class="toggle-label">Allow External Connections</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="config-section">
+                        <div class="section-title">KISS Parameter Controls</div>
+                        <div class="kiss-params">
+                            ${renderKissParam(c, 'Control TxDelay', 'filterTxDelay', 'txDelayValue', 'ms', 'ms')}
+                        </div>
+                    </div>
+
+                    <div class="config-section">
+                        <div class="collapsible-header" onclick="toggleSection(this)">
+                            <span class="section-title">Advanced</span>
+                            <span class="collapsible-arrow">&#9654;</span>
+                        </div>
+                        <div class="collapsible-content">
+                            <div style="margin-top: 12px;">
+                                <div class="kiss-params">
+                                    ${renderKissParam(c, 'Control TxTail', 'filterTxTail', 'txTailValue', 'ms', 'ms')}
+                                    ${renderKissParam(c, 'Control Slot Time', 'filterSlotTime', 'slotTimeValue', 'ms', 'ms')}
+                                    ${renderKissParam(c, 'Control Persistence', 'filterPersistence', 'persistenceValue', '0–255', '')}
+                                    <div class="kiss-param">
+                                        <label class="toggle">
+                                            <input type="checkbox" ${c.filterSetHardware ? 'checked' : ''} onchange="updateConfig('${c.id}', 'filterSetHardware', this.checked)">
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                        <span>Prevent node mode control</span>
+                                    </div>
+                                    <div class="kiss-param">
+                                        <span>Param resend interval</span>
+                                        <input type="number" value="${c.parameterSendInterval ?? 600}" min="0" onchange="updateConfig('${c.id}', 'parameterSendInterval', parseInt(this.value))">
+                                        <span class="kiss-param-unit">s (0 = on connect only)</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mqtt-per-modem" style="margin-top: 15px;">
+                                <div class="section-title" style="font-size: 0.8rem; margin-bottom: 10px;">MQTT (Per-Modem)</div>
+                                <div class="config-grid">
+                                    <div class="config-field">
+                                        <label>Topic Prefix (optional, overrides modem ID)</label>
+                                        <input type="text" value="${c.mqttTopicPrefix || ''}" placeholder="e.g. myrig/2m" onchange="updateConfig('${c.id}', 'mqttTopicPrefix', this.value || null)">
+                                    </div>
+                                    <div class="toggle-field">
+                                        <label class="toggle">
+                                            <input type="checkbox" ${c.base64 ? 'checked' : ''} onchange="updateConfig('${c.id}', 'base64', this.checked)">
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                        <span class="toggle-label">Encode to base64</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="config-section">
+                        <div class="section-title">NinoTNC Mode</div>
+                        <div class="setup-note">
+                            <strong>Hardware setup required before using software mode control:</strong>
+                            <ul>
+                                <li>Set the <strong>Mode DIP switches to 1111</strong> — this hands mode control over to software (KISS SETHW commands).</li>
+                                <li>Set the <strong>TXDELAY potentiometer to zero</strong> — this hands TX delay control over to software.</li>
+                                <li>Set the <strong>Signals DIP switches</strong> and <strong>Deviation (volume) control</strong> appropriately for your radio — these are not software-controlled.</li>
+                                <li>Press the <strong>Test button</strong> on the TNC to send a status frame; the NinoTNC Status panel will update with the currently active mode and other details.</li>
+                            </ul>
+                        </div>
+                        <div class="config-grid">
+                            <div class="config-field">
+                                <label>Mode</label>
+                                <select class="nino-mode-select" onchange="updateConfig('${c.id}', 'ninoMode', this.value === '' ? null : parseInt(this.value))">
+                                    <option value="">Not set</option>
+                                    ${ninoModes.filter(m => m.mode !== 15).map(m => `<option value="${m.mode}" ${c.ninoMode === m.mode ? 'selected' : ''}>${m.mode}: ${m.name}</option>`).join('')}
+                                </select>
+                            </div>
+                            <div class="toggle-field">
+                                <label class="toggle">
+                                    <input type="checkbox" ${c.persistNinoMode ? 'checked' : ''} onchange="updateConfig('${c.id}', 'persistNinoMode', this.checked)">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                                <span class="toggle-label">Persist to Flash</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="modem-actions">
+                        <button class="btn-success" onclick="applyConfig('${c.id}')">Apply Now</button>
+                        <button class="btn-danger" onclick="removeModem('${c.id}')">Remove Modem</button>
+                    </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function toggleModemCollapse(id) {
+            if (collapsedModems.has(id)) {
+                collapsedModems.delete(id);
+            } else {
+                collapsedModems.add(id);
+            }
+            // Re-render just this card to reflect the new state
+            const card = document.querySelector(`.modem-card[data-modem-id="${id}"]`);
+            if (card) {
+                const modem = modems.find(m => m.config.id === id);
+                if (modem) card.outerHTML = renderModemCard(modem);
+            }
+        }
+
+        function toggleSection(header) {
+            const arrow = header.querySelector('.collapsible-arrow');
+            const content = header.nextElementSibling;
+            if (content) {
+                content.classList.toggle('open');
+                if (arrow) arrow.classList.toggle('open');
+            }
+        }
+
+        function renderKissParam(config, label, filterKey, valueKey, placeholder, unit) {
+            const filterId = config.id;
+            const enabled = !!config[filterKey];
+            return `
+                <div class="kiss-param">
+                    <label class="toggle">
+                        <input type="checkbox" ${enabled ? 'checked' : ''}
+                               onchange="updateConfig('${filterId}', '${filterKey}', this.checked);
+                                         this.closest('.kiss-param').querySelector('input[type=number]').disabled = !this.checked;">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <span>${label}</span>
+                    <input type="number" value="${config[valueKey] ?? ''}" placeholder="${placeholder}"
+                           ${enabled ? '' : 'disabled'}
+                           onchange="updateConfig('${filterId}', '${valueKey}', this.value === '' ? null : parseInt(this.value))">
+                    ${unit ? `<span class="kiss-param-unit">${unit}</span>` : ''}
+                </div>
+            `;
+        }
+
+        async function updateConfig(id, key, value) {
+            const modem = modems.find(m => m.config.id === id);
+            if (!modem) return;
+
+            modem.config[key] = value;
+            hasUnsavedChanges = true;
+            document.getElementById('unsaved-banner').classList.add('show');
+
+            try {
+                await api('PUT', `/modems/${id}`, modem.config);
+            } catch (e) {
+                showToast('Failed to update config: ' + e.message, 'error');
+            }
+        }
+
+        function updateNinoModeDisplay(id, modeNum) {
+            const panel = document.getElementById(`ninotnc-${id}`);
+            if (!panel) return;
+
+            const modeEl = panel.querySelector('.ninotnc-mode');
+            if (!modeEl) return;
+
+            if (modeNum === null || modeNum === undefined) {
+                // Mode cleared - don't update display, let TX Test frame set it
+                return;
+            }
+
+            // Find the mode name from ninoModes array
+            const modeInfo = ninoModes.find(m => m.mode === modeNum);
+            const modeName = modeInfo ? modeInfo.name : `Mode ${modeNum}`;
+            const equivSwitch = modeNum.toString(2).padStart(4, '0');
+
+            // Show as software-controlled mode
+            modeEl.innerHTML = `${modeName} <span style="font-size:0.7rem;color:var(--warning)">(via KISS = ${modeNum} / ${equivSwitch})</span>`;
+
+            // Also show the panel if not already visible
+            panel.classList.add('active');
+        }
+
+        async function applyConfig(id) {
+            try {
+                await api('POST', `/modems/${id}/apply`);
+                showToast('Config applied to modem', 'success');
+
+                // Track and display applied NinoTNC mode
+                const modem = modems.find(m => m.config.id === id);
+                if (modem && modem.config.ninoMode !== null && modem.config.ninoMode !== undefined) {
+                    appliedModes[id] = modem.config.ninoMode;
+                    updateNinoModeDisplay(id, modem.config.ninoMode);
+                } else {
+                    delete appliedModes[id];
+                }
+            } catch (e) {
+                showToast('Failed to apply config: ' + e.message, 'error');
+            }
+        }
+
+        async function saveConfig() {
+            try {
+                await api('POST', '/save');
+                hasUnsavedChanges = false;
+                document.getElementById('unsaved-banner').classList.remove('show');
+                showToast('Config saved successfully', 'success');
+            } catch (e) {
+                showToast('Failed to save config: ' + e.message, 'error');
+            }
+        }
+
+        async function removeModem(id) {
+            if (!confirm(`Remove modem "${id}"? This cannot be undone.`)) return;
+
+            try {
+                await api('DELETE', `/modems/${id}`);
+                modems = modems.filter(m => m.config.id !== id);
+                renderModems();
+                populateModemDropdown();
+                updateTestTransmissionVisibility();
+                hasUnsavedChanges = true;
+                document.getElementById('unsaved-banner').classList.add('show');
+                showToast('Modem removed', 'success');
+            } catch (e) {
+                showToast('Failed to remove modem: ' + e.message, 'error');
+            }
+        }
+
+        async function showAddModem() {
+            // Refresh serial port list from OS before showing
+            const select = document.getElementById('new-modem-port');
+            select.innerHTML = '<option value="">Loading...</option>';
+            document.getElementById('add-modem-modal').classList.add('active');
+            await loadSerialPorts();
+            select.innerHTML = serialPorts.map(p => `<option value="${p.path}">${p.displayName}</option>`).join('');
+            if (serialPorts.length === 0) {
+                select.innerHTML = '<option value="">No ports found</option>';
+            }
+
+            // Pre-populate TCP port: one above the highest port ever seen this session.
+            // Using a high-water mark (rather than just the current modems list) ensures that
+            // deleting a modem and re-adding doesn't suggest the just-freed port again.
+            const maxFromCurrent = modems.reduce((max, m) => Math.max(max, m.config.tcpPort || 0), 0);
+            document.getElementById('new-modem-tcpport').value = Math.max(maxFromCurrent, tcpPortHighWaterMark) + 1;
+
+            // Clear stale values from a previous open
+            document.getElementById('new-modem-id').value = '';
+        }
+
+        function hideAddModem() {
+            document.getElementById('add-modem-modal').classList.remove('active');
+        }
+
+        async function addModem() {
+            const id = document.getElementById('new-modem-id').value.trim();
+            const comPort = document.getElementById('new-modem-port').value;
+            const baud = parseInt(document.getElementById('new-modem-baud').value);
+            const tcpPort = parseInt(document.getElementById('new-modem-tcpport').value);
+
+            if (!id) {
+                showToast('Modem ID is required', 'error');
+                return;
+            }
+            if (!comPort) {
+                showToast('Serial port is required', 'error');
+                return;
+            }
+
+            const newConfig = {
+                id, comPort, baud, tcpPort,
+                anyHost: false,
+                filterTxDelay: false,
+                filterPersistence: false,
+                filterSlotTime: false,
+                filterTxTail: false,
+                filterSetHardware: false,
+                parameterSendInterval: 600,
+                persistNinoMode: false
+            };
+
+            try {
+                await api('POST', '/modems', newConfig);
+                tcpPortHighWaterMark = Math.max(tcpPortHighWaterMark, tcpPort);
+                hideAddModem();
+                await loadModems();
+                hasUnsavedChanges = true;
+                document.getElementById('unsaved-banner').classList.add('show');
+                showToast('Modem added successfully', 'success');
+            } catch (e) {
+                showToast('Failed to add modem: ' + e.message, 'error');
+            }
+        }
+
+        function showToast(message, type = 'success') {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = `toast ${type} show`;
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            // Check for saved token
+            const savedToken = localStorage.getItem('kissproxy-token');
+            if (savedToken) {
+                authToken = savedToken;
+                // Verify token is still valid
+                api('GET', '/config-status')
+                    .then(() => showApp())
+                    .catch(() => showLogin());
+            } else {
+                showLogin();
+            }
+
+            // Enter key to login
+            document.getElementById('password-input').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') login();
+            });
+        });
+    </script>
+</body>
+</html>

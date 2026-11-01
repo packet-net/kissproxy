@@ -1,4 +1,4 @@
-using FluentAssertions;
+using AwesomeAssertions;
 using kissproxylib;
 
 namespace kissproxy_tests;

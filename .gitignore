@@ -3,3 +3,7 @@ bin/
 obj/
 *.user
 publish
+# Single-file publish output
+src/kissproxy/kissproxy
+src/kissproxy/wwwroot/*.br
+src/kissproxy/wwwroot/*.gz
