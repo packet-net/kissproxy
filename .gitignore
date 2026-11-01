@@ -3,3 +3,5 @@ bin/
 obj/
 *.user
 publish
+# Single-file publish output
+src/kissproxy/kissproxy
