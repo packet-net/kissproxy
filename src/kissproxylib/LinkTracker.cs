@@ -4,6 +4,8 @@ namespace kissproxylib;
 /// <param name="Local">Our callsign on this link, or null for a frame we only heard</param>
 /// <param name="Remote">The link partner (for a heard-only frame, its sender)</param>
 /// <param name="Snr">Received SNR in dB, when a radio supplies one</param>
+/// <param name="Rssi">Received signal strength in dBm, when a radio supplies one</param>
+/// <param name="NoiseFloor">The channel's noise floor in dBm when the frame arrived</param>
 public sealed record FrameRecord(
     DateTime Timestamp,
     string Modem,
@@ -23,7 +25,9 @@ public sealed record FrameRecord(
     byte[] Raw,
     string? Local,
     string Remote,
-    double? Snr = null);
+    double? Snr = null,
+    double? Rssi = null,
+    double? NoiseFloor = null);
 
 /// <summary>
 /// Something that happened on a link. Kind "state" carries the new State; the others mark

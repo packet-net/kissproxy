@@ -56,7 +56,9 @@ public sealed class LinkMonitor : IDisposable
     }
 
     /// <summary>Records one KISS frame seen going to (transmitted) or coming from a modem.</summary>
-    public void Record(string modem, bool transmitted, byte[] kissFrame, DateTime? timestamp = null)
+    /// <param name="radio">For a received frame, its signal readings given its AX.25 length</param>
+    public void Record(string modem, bool transmitted, byte[] kissFrame, DateTime? timestamp = null,
+        Func<int, RadioMetadata?>? radio = null)
     {
         var data = Ax25Decoder.UnkissData(kissFrame);
         if (data == null)
@@ -68,6 +70,7 @@ public sealed class LinkMonitor : IDisposable
 
         var summary = Ax25Decoder.Describe(data.Ax25);
         var t = timestamp ?? DateTime.UtcNow;
+        var signal = transmitted ? null : radio?.Invoke(data.Ax25.Length);
 
         lock (sync)
         {
@@ -78,7 +81,8 @@ public sealed class LinkMonitor : IDisposable
 
             var frame = new FrameRecord(t, modem, transmitted, data.Port, fields.Source, fields.Dest,
                 string.Join(",", fields.Digis), fields.Type, fields.CommandResponse, fields.PollFinal,
-                fields.Ns, fields.Nr, fields.Pid, fields.InfoLength, summary, data.Ax25, local, remote);
+                fields.Ns, fields.Nr, fields.Pid, fields.InfoLength, summary, data.Ax25, local, remote,
+                signal?.SnrDb, signal?.RssiDbm, signal?.NoiseFloorDbm);
 
             store.Add(frame, tracker.Observe(frame));
         }

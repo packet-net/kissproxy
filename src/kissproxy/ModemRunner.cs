@@ -9,7 +9,7 @@ namespace kissproxy;
 /// </summary>
 internal class ModemRunner(ConfigManager configManager, ModemStateManager stateManager, LinkMonitor linkMonitor, Action<string> logInfo, CancellationToken shutdown)
 {
-    private record Running(KissProxy Proxy, Config Config, CancellationTokenSource Cts, Task Task);
+    private record Running(KissProxy Proxy, Config Config, CancellationTokenSource Cts, Task Task, TaitRadioLink? Radio);
 
     private readonly ConcurrentDictionary<string, Running> running = new();
     private readonly SemaphoreSlim changeLock = new(1, 1);
@@ -23,7 +23,8 @@ internal class ModemRunner(ConfigManager configManager, ModemStateManager stateM
             return;
 
         var state = stateManager.GetOrCreate(config.Id);
-        var proxy = new KissProxy(config.Id, new ConsoleLogger(config.Id)) { LinkMonitor = linkMonitor };
+        var radio = StartRadio(config);
+        var proxy = new KissProxy(config.Id, new ConsoleLogger(config.Id)) { LinkMonitor = linkMonitor, Radio = radio };
         var cts = CancellationTokenSource.CreateLinkedTokenSource(shutdown);
 
         // Global settings (MQTT etc.) are read as the proxy starts
@@ -40,7 +41,7 @@ internal class ModemRunner(ConfigManager configManager, ModemStateManager stateM
             }
         });
 
-        running[config.Id] = new Running(proxy, config, cts, task);
+        running[config.Id] = new Running(proxy, config, cts, task, radio);
         Proxies[config.Id] = proxy;
         logInfo($"Started proxy for modem '{config.Id}' on port {config.TcpPort}");
     }
@@ -80,7 +81,20 @@ internal class ModemRunner(ConfigManager configManager, ModemStateManager stateM
             {
                 // Filters etc. take effect at once; parameters reach the modem only on Apply
                 current.Proxy.UpdateConfig(config);
-                running[id] = current with { Config = config };
+                var radio = current.Radio;
+
+                // A new radio setting swaps just the radio, leaving the TNC and node links up
+                if (config.RadioPort != current.Config.RadioPort || config.RadioBaud != current.Config.RadioBaud)
+                {
+                    current.Proxy.Radio = null;
+                    if (radio != null)
+                        await radio.DisposeAsync();
+                    radio = StartRadio(config);
+                    current.Proxy.Radio = radio;
+                    logInfo($"Radio for modem '{id}' is now {config.RadioPort ?? "none"}");
+                }
+
+                running[id] = current with { Config = config, Radio = radio };
             }
         }
         catch (Exception ex)
@@ -93,8 +107,16 @@ internal class ModemRunner(ConfigManager configManager, ModemStateManager stateM
         }
     }
 
-    /// <summary>Waits for every proxy to finish (after shutdown has been requested).</summary>
-    public Task WhenAllStopped() => Task.WhenAll(running.Values.Select(r => r.Task));
+    /// <summary>Waits for every proxy to finish (after shutdown has been requested), then closes the radios.</summary>
+    public async Task WhenAllStopped()
+    {
+        await Task.WhenAll(running.Values.Select(r => r.Task));
+        foreach (var r in running.Values)
+        {
+            if (r.Radio != null)
+                await r.Radio.DisposeAsync();
+        }
+    }
 
     private async Task StopAsync(string id, Running current)
     {
@@ -104,6 +126,8 @@ internal class ModemRunner(ConfigManager configManager, ModemStateManager stateM
         try { await current.Task.WaitAsync(TimeSpan.FromSeconds(10)); }
         catch (TimeoutException) { logInfo($"WARN: Proxy for modem '{id}' took more than 10 s to stop"); }
         current.Cts.Dispose();
+        if (current.Radio != null)
+            await current.Radio.DisposeAsync();
     }
 
     // Settings the proxy reads only when it starts (the serial port and TCP listener, MQTT topics)
@@ -114,4 +138,9 @@ internal class ModemRunner(ConfigManager configManager, ModemStateManager stateM
         || old.AnyHost != updated.AnyHost
         || old.MqttTopicPrefix != updated.MqttTopicPrefix
         || old.Base64 != updated.Base64;
+
+    private TaitRadioLink? StartRadio(Config config) =>
+        string.IsNullOrWhiteSpace(config.RadioPort)
+            ? null
+            : new TaitRadioLink(config.Id, config.RadioPort, config.RadioBaud, new ConsoleLogger(config.Id), linkMonitor.Store.AddNoise);
 }
