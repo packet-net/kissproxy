@@ -67,7 +67,7 @@ public sealed class TaitRadioLink : IAsyncDisposable
                 await radio.SetProgressMessagesAsync(true, cancellationToken); // carrier-sense edges
                 var identity = await radio.QueryIdentityAsync(cancellationToken);
 
-                m = new RadioSignalMonitor(radio, modem, onNoiseSample);
+                m = new RadioSignalMonitor(radio, modem, onNoiseSample, log: line => logger.LogInformation("{line}", line));
                 var session = new SessionState();
                 var sessionMonitor = m;
                 radio.ConnectionStateChanged += (_, state) => session.OnConnectionState(state);

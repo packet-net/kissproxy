@@ -51,7 +51,8 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     private readonly Action<NoiseSample>? onNoiseSample;
     private readonly Func<DateTime> clock;
     private readonly CancellationTokenSource cts = new();
-    private readonly Task? samplerLoop;
+    private readonly Thread? sampler;
+    private readonly Action<string>? log;
     private readonly object gate = new();
     private readonly Queue<(DateTime At, float Dbm)> samples = new();
     private readonly Queue<CarrierWindow> windows = new();
@@ -66,10 +67,12 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
 
     /// <param name="onNoiseSample">Called once a minute with that minute's noise floor</param>
     /// <param name="startSampling">False to drive samples by hand (tests)</param>
+    /// <param name="log">Gets a line a minute with the read rate and timings</param>
     public RadioSignalMonitor(IRadioControl radio, string modem, Action<NoiseSample>? onNoiseSample = null,
-        Func<DateTime>? clock = null, bool startSampling = true)
+        Func<DateTime>? clock = null, bool startSampling = true, Action<string>? log = null)
     {
         this.radio = radio;
+        this.log = log;
         this.modem = modem;
         this.onNoiseSample = onNoiseSample;
         this.clock = clock ?? (() => DateTime.UtcNow);
@@ -78,7 +81,10 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             radio.CarrierSenseChanged += OnCarrierSenseChanged;
 
         if (startSampling)
-            samplerLoop = Task.Run(() => SampleLoopAsync(cts.Token));
+        {
+            sampler = new Thread(() => SampleLoop(cts.Token)) { IsBackground = true, Name = $"rssi:{modem}" };
+            sampler.Start();
+        }
     }
 
     /// <summary>Current noise floor in dBm, or null before the first idle sample.</summary>
@@ -230,19 +236,23 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
         return closed.FallAt!.Value > open.RiseAt || fitsSinceTheOpenRise ? open : closed;
     }
 
-    private async Task SampleLoopAsync(CancellationToken cancellationToken)
+    // One thread per radio doing read, record, read, record: the radio's serial link is the
+    // pace-setter, so a plain blocking loop is all this needs
+    private void SampleLoop(CancellationToken cancellationToken)
     {
-        var period = System.Diagnostics.Stopwatch.StartNew();
+        var read = new System.Diagnostics.Stopwatch();
+        var stats = new ReadStats(clock());
         while (!cancellationToken.IsCancellationRequested)
         {
+            read.Restart();
             try
             {
-                period.Restart();
-                var dbm = await radio.ReadRssiDbmAsync(cancellationToken);
+                var dbm = radio.ReadRssiDbmAsync(cancellationToken).AsTask().GetAwaiter().GetResult();
                 Record(clock(), dbm);
                 Volatile.Write(ref consecutiveFailures, 0);
-                if (period.Elapsed < MinReadPeriod)
-                    await Task.Delay(MinReadPeriod - period.Elapsed, cancellationToken);
+                stats.Read(read.Elapsed);
+                if (read.Elapsed < MinReadPeriod)
+                    cancellationToken.WaitHandle.WaitOne(MinReadPeriod - read.Elapsed);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -252,9 +262,41 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             {
                 Interlocked.Increment(ref consecutiveFailures);
                 Interlocked.Increment(ref totalFailures);
-                try { await Task.Delay(FailureBackoff, cancellationToken); }
-                catch (OperationCanceledException) { return; }
+                stats.Failed();
+                cancellationToken.WaitHandle.WaitOne(FailureBackoff);
             }
+
+            var now = clock();
+            if (now - stats.Since >= TimeSpan.FromMinutes(1))
+            {
+                log?.Invoke(stats.Summary(now, NoiseFloorDbm));
+                stats = new ReadStats(now);
+            }
+        }
+    }
+
+    private sealed class ReadStats(DateTime since)
+    {
+        public DateTime Since { get; } = since;
+        private int reads, failures;
+        private TimeSpan total, worst;
+
+        public void Read(TimeSpan took)
+        {
+            reads++;
+            total += took;
+            if (took > worst)
+                worst = took;
+        }
+
+        public void Failed() => failures++;
+
+        public string Summary(DateTime now, float? floor)
+        {
+            double secs = Math.Max(1, (now - Since).TotalSeconds);
+            var avg = reads > 0 ? total.TotalMilliseconds / reads : 0;
+            return $"RSSI {reads / secs:F1} reads/s, {avg:F1} ms average, {worst.TotalMilliseconds:F0} ms worst, {failures} failed"
+                + (floor is { } f ? $", noise floor {f:F1} dBm" : "");
         }
     }
 
@@ -274,10 +316,8 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
         if (radio.Capabilities.HasFlag(RadioCapabilities.CarrierSense))
             radio.CarrierSenseChanged -= OnCarrierSenseChanged;
         cts.Cancel();
-        if (samplerLoop != null)
-        {
-            try { await samplerLoop; } catch { }
-        }
+        if (sampler != null)
+            await Task.Run(() => sampler.Join(TimeSpan.FromSeconds(5)));
         cts.Dispose();
     }
 
