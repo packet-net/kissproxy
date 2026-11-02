@@ -439,6 +439,23 @@ public class RadioSignalTests : IDisposable
         monitor.Attribute(delivered2, 15, 9600)?.RssiDbm.Should().NotBe(-80);
     }
 
+    [Fact]
+    public void SlowRadio_AReadingStraddlingAShortCarrierStillCounts()
+    {
+        // 39 ms reads, as on GB7RDG's 70cm radio. A 30 ms carrier as reported, with the one read
+        // that overlapped it stamped (at its middle) 10 ms after the reported fall
+        monitor.NoteReadTime(TimeSpan.FromMilliseconds(39));
+        Idle(T0, TimeSpan.FromSeconds(5), -126);
+        var delivered = T0.AddSeconds(5);
+        radio.Busy = true;
+        monitor.OnCarrierSense(true, delivered.AddMilliseconds(-40));
+        radio.Busy = false;
+        monitor.OnCarrierSense(false, delivered.AddMilliseconds(-10));
+        monitor.Record(delivered, -113);
+
+        monitor.Attribute(delivered, 15, 1200)!.RssiDbm.Should().Be(-113);
+    }
+
     private sealed class FakeRadio : IRadioControl
     {
         public RadioCapabilities Capabilities { get; init; } = RadioCapabilities.RssiRead | RadioCapabilities.CarrierSense;
