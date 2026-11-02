@@ -67,7 +67,13 @@ public sealed class TaitRadioLink : IAsyncDisposable
                 await radio.SetProgressMessagesAsync(true, cancellationToken); // carrier-sense edges
                 var identity = await radio.QueryIdentityAsync(cancellationToken);
 
-                m = new RadioSignalMonitor(radio, modem, onNoiseSample, log: line => logger.LogInformation("{line}", line));
+                var counts = new MessageCounts();
+                radio.MessageReceived += (_, _) => counts.Message();
+                radio.ProgressReceived += (_, p) => counts.Progress(p.Type.ToString());
+                radio.ErrorReceived += (_, _) => counts.Error();
+                radio.CarrierSenseChanged += (_, _) => counts.Edge();
+
+                m = new RadioSignalMonitor(radio, modem, onNoiseSample, log: line => logger.LogInformation("{line}; {messages}", line, counts.TakeSummary()));
                 var session = new SessionState();
                 var sessionMonitor = m;
                 radio.ConnectionStateChanged += (_, state) => session.OnConnectionState(state);
@@ -150,6 +156,38 @@ public sealed class TaitRadioLink : IAsyncDisposable
         cts.Cancel();
         try { await loop; } catch { }
         cts.Dispose();
+    }
+
+    // What the radio sent in the last minute, for the log: every message (including the answers
+    // to our queries), the unsolicited progress messages by type, carrier edges and unsolicited
+    // errors. A radio flooding progress messages would show here when its reads slow down.
+    private sealed class MessageCounts
+    {
+        private readonly object gate = new();
+        private readonly Dictionary<string, int> progress = [];
+        private int messages, errors, edges;
+
+        public void Message() { lock (gate) messages++; }
+        public void Error() { lock (gate) errors++; }
+        public void Edge() { lock (gate) edges++; }
+
+        public void Progress(string type)
+        {
+            lock (gate)
+                progress[type] = progress.GetValueOrDefault(type) + 1;
+        }
+
+        public string TakeSummary()
+        {
+            lock (gate)
+            {
+                var byType = progress.Count == 0 ? "none" : string.Join(" ", progress.OrderByDescending(p => p.Value).Select(p => $"{p.Key}x{p.Value}"));
+                var line = $"radio sent {messages} messages: progress {byType}, {edges} carrier edges, {errors} errors";
+                progress.Clear();
+                messages = errors = edges = 0;
+                return line;
+            }
+        }
     }
 
     // The driver's connection-state events arrive on its own threads
