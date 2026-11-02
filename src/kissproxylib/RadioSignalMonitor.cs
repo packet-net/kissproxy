@@ -58,6 +58,12 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
     public static readonly TimeSpan MaxLookAhead = TimeSpan.FromMilliseconds(200);
     private readonly Queue<double> riseLagsMs = new();
 
+    // A running average of how long a read takes. Readings are stamped at the middle of their
+    // query (the radio measured somewhere in it, not when its answer arrived), and counted for a
+    // carrier window if they're within half a read of it: on GB7RDG's 70cm radio a read takes
+    // about 39 ms, as long as a short frame's whole carrier.
+    private double typicalReadMs;
+
     // How long past carrier-fall a delivered frame can still belong to that window: the
     // modem's decode and serial delivery (measured 34-115 ms at 1200 baud)
     private static readonly TimeSpan WindowAttributionSlack = TimeSpan.FromMilliseconds(500);
@@ -146,10 +152,11 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             bool ahead = lookAhead > TimeSpan.Zero && airtime != null;
             var latest = ahead ? receivedAt + lookAhead : receivedAt;
             var found = ahead ? FindWindowFast(receivedAt, airtime!.Value, lookAhead) : FindWindow(receivedAt, airtime);
+            var halfRead = TimeSpan.FromMilliseconds(typicalReadMs / 2);
             if (radio.Capabilities.HasFlag(RadioCapabilities.CarrierSense) && found is { } window)
             {
                 var to = window.FallAt is { } fall && fall < latest ? fall : latest;
-                var stats = Statistics(samples.Where(s => s.At >= window.RiseAt && s.At <= to).Select(s => s.Dbm));
+                var stats = Statistics(samples.Where(s => s.At >= window.RiseAt - halfRead && s.At <= to + halfRead).Select(s => s.Dbm));
                 if (stats is { } st)
                     return new RadioMetadata(st.Median, floor is { } f ? st.Median - f : null, floor, st.Count);
                 // The carrier was too short to sample; the floor is still worth keeping
@@ -159,12 +166,19 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             // No carrier sense, or the window was missed: samples above the floor count as signal
             var from = receivedAt - AttributionLookback;
             var signal = samples
-                .Where(s => s.At >= from && s.At <= latest && (floor == null || s.Dbm >= floor + SignalThresholdDb))
+                .Where(s => s.At >= from && s.At <= latest + halfRead && (floor == null || s.Dbm >= floor + SignalThresholdDb))
                 .Select(s => s.Dbm);
             return Statistics(signal) is { } t
                 ? new RadioMetadata(t.Median, floor is { } f2 ? t.Median - f2 : null, floor, t.Count)
                 : null;
         }
+    }
+
+    /// <summary>Notes how long a read took (the sampler's job; public for tests).</summary>
+    public void NoteReadTime(TimeSpan took)
+    {
+        lock (gate)
+            typicalReadMs = typicalReadMs == 0 ? took.TotalMilliseconds : typicalReadMs + 0.05 * (took.TotalMilliseconds - typicalReadMs);
     }
 
     /// <summary>Records one RSSI reading (the sampler's job; public for tests).</summary>
@@ -357,12 +371,16 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
         while (!cancellationToken.IsCancellationRequested)
         {
             read.Restart();
+            var asked = clock();
             try
             {
                 var dbm = radio.ReadRssiDbmAsync(cancellationToken).AsTask().GetAwaiter().GetResult();
-                Record(clock(), dbm);
+                var took = read.Elapsed;
+                // Stamped at the middle of the query: the radio measured somewhere in it
+                Record(asked + took / 2, dbm);
+                NoteReadTime(took);
                 Volatile.Write(ref consecutiveFailures, 0);
-                stats.Read(read.Elapsed);
+                stats.Read(took);
                 if (read.Elapsed < MinReadPeriod)
                     cancellationToken.WaitHandle.WaitOne(MinReadPeriod - read.Elapsed);
             }
