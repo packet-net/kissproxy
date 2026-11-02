@@ -200,7 +200,7 @@ public class RadioSignalTests : IDisposable
     [Fact]
     public void DenseReadings_ASpikeBarelyMovesTheFloor()
     {
-        // Continuous reads: one every 14 ms
+        // Dense readings (one every 14 ms): the smoothing must not depend on the read rate
         radio.Busy = false;
         for (var t = T0; t < T0.AddSeconds(20); t += TimeSpan.FromMilliseconds(14))
             monitor.Record(t, -121);
@@ -252,7 +252,7 @@ public class RadioSignalTests : IDisposable
         var m = new RadioSignalMonitor(radio, "70cm", clock: () => new DateTime(Interlocked.Add(ref ticks, TimeSpan.TicksPerSecond), DateTimeKind.Utc),
             log: line => { lock (lines) lines.Add(line); });
 
-        var deadline = DateTime.UtcNow.AddSeconds(5);
+        var deadline = DateTime.UtcNow.AddSeconds(15);
         while (DateTime.UtcNow < deadline)
         {
             lock (lines) if (lines.Count > 0) break;

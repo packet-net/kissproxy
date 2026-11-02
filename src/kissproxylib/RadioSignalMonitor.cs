@@ -14,22 +14,23 @@ public sealed record RadioMetadata(float? RssiDbm, float? SnrDb, float? NoiseFlo
 public sealed record NoiseSample(DateTime Timestamp, string Modem, float FloorDbm, float? MedianIdleDbm);
 
 /// <summary>
-/// Reads a radio's RSSI continuously (each read straight after the last: about 70 a second on
-/// Tait CCDI at 28800 baud, whose round trip measured 14 ms), follows its carrier-sense edges as
-/// transmission windows, and attributes RSSI and SNR to each received frame by matching its
-/// arrival time to the window that carried it. Readings taken while the channel is idle track the
-/// noise floor. Ported from packet.net's RssiTaggingTransport (Packet.Ax25.Radio), which polls at
-/// 40 ms busy and 400 ms idle; that missed most short frames at 9600 baud (a 15-byte RR is on air
-/// for well under the idle period), so this one doesn't wait between reads.
+/// Reads a radio's RSSI ten times a second, follows its carrier-sense edges as transmission
+/// windows, and attributes RSSI and SNR to each received frame by matching its arrival time to the
+/// window that carried it. Readings taken while the channel is idle track the noise floor. Ported
+/// from packet.net's RssiTaggingTransport (Packet.Ax25.Radio), which polls at 40 ms busy and
+/// 400 ms idle; that missed most short frames at 9600 baud.
 /// </summary>
 public sealed class RadioSignalMonitor : IAsyncDisposable
 {
     // After a failed read, so a radio that has gone away isn't polled flat out
     private static readonly TimeSpan FailureBackoff = TimeSpan.FromMilliseconds(200);
 
-    // Reads are back to back, but never closer than this: a guard against spinning on a radio
-    // that answers instantly (a real CCDI read takes about 14 ms, so this never slows it)
-    private static readonly TimeSpan MinReadPeriod = TimeSpan.FromMilliseconds(5);
+    // One read every this often. Back-to-back reads (about 60 a second on a TM8110, 25 on
+    // GB7RDG's 70cm radio) drove the 70cm radio into a state where every read took about 250 ms,
+    // after about 25 minutes each time, until it was power cycled; at ten a second it stayed
+    // healthy, and with the look-ahead and midpoint stamps more 70cm frames got an SNR than at
+    // full rate (75%, against 71%). It also costs the Pi far less.
+    private static readonly TimeSpan ReadPeriod = TimeSpan.FromMilliseconds(100);
 
     // Samples kept for attribution; comfortably longer than any frame plus TXDELAY
     private static readonly TimeSpan SampleHorizon = TimeSpan.FromSeconds(10);
@@ -381,8 +382,8 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
                 NoteReadTime(took);
                 Volatile.Write(ref consecutiveFailures, 0);
                 stats.Read(took);
-                if (read.Elapsed < MinReadPeriod)
-                    cancellationToken.WaitHandle.WaitOne(MinReadPeriod - read.Elapsed);
+                if (read.Elapsed < ReadPeriod)
+                    cancellationToken.WaitHandle.WaitOne(ReadPeriod - read.Elapsed);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
