@@ -389,11 +389,11 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
             {
                 return;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 Interlocked.Increment(ref consecutiveFailures);
                 Interlocked.Increment(ref totalFailures);
-                stats.Failed();
+                stats.Failed(ex);
                 cancellationToken.WaitHandle.WaitOne(FailureBackoff);
             }
 
@@ -412,6 +412,7 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
         public DateTime Since { get; } = since;
         private int reads, failures;
         private TimeSpan total, worst;
+        private readonly Dictionary<string, int> reasons = [];
 
         public void Read(TimeSpan took)
         {
@@ -421,13 +422,20 @@ public sealed class RadioSignalMonitor : IAsyncDisposable
                 worst = took;
         }
 
-        public void Failed() => failures++;
+        public void Failed(Exception ex)
+        {
+            failures++;
+            // e.g. the radio's own error ("... failed: radio not ready") or the driver's timeout
+            var reason = $"{ex.GetType().Name}: {ex.Message}";
+            reasons[reason] = reasons.GetValueOrDefault(reason) + 1;
+        }
 
         public string Summary(DateTime now, float? floor)
         {
             double secs = Math.Max(1, (now - Since).TotalSeconds);
             var avg = reads > 0 ? total.TotalMilliseconds / reads : 0;
             return $"RSSI {reads / secs:F1} reads/s, {avg:F1} ms average, {worst.TotalMilliseconds:F0} ms worst, {failures} failed"
+                + (reasons.Count > 0 ? $" ({string.Join(", ", reasons.OrderByDescending(r => r.Value).Select(r => $"{r.Key} x{r.Value}"))})" : "")
                 + (floor is { } f ? $", noise floor {f:F1} dBm" : "");
         }
     }
