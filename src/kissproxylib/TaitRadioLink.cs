@@ -14,6 +14,12 @@ public sealed class TaitRadioLink : IAsyncDisposable
     // answer costs the driver's 2 s transaction timeout, so this is about 20 s of silence.
     private const int MaxConsecutiveFailures = 10;
 
+    // RSSI readings outside this range can't be real, so the reply that carried one is logged
+    private const float PlausibleMinDbm = -140, PlausibleMaxDbm = -20;
+
+    // Garbled and implausible replies logged in full per minute; the rest are only counted
+    private const int MaxRepliesLoggedPerMinute = 10;
+
     // The driver reports Faulted when its keep-alive goes unanswered; give it this long to recover
     private static readonly TimeSpan FaultedLimit = TimeSpan.FromSeconds(30);
 
@@ -68,7 +74,19 @@ public sealed class TaitRadioLink : IAsyncDisposable
                 var identity = await radio.QueryIdentityAsync(cancellationToken);
 
                 var counts = new MessageCounts();
-                radio.MessageReceived += (_, _) => counts.Message();
+                radio.MessageReceived += (_, message) =>
+                {
+                    counts.Message();
+                    if (message is CcdiQueryResultMessage { CctmCommand: 64 } r
+                        && (r.AsDecibels() is not { } dbm || dbm < PlausibleMinDbm || dbm > PlausibleMaxDbm)
+                        && counts.Implausible())
+                        logger.LogWarning("Tait radio on {port}: implausible RSSI reply {reply}", port, new CcdiFrame('j', $"064{r.Value}").Encode());
+                };
+                radio.LineRejected += (_, line) =>
+                {
+                    if (counts.Garbled())
+                        logger.LogWarning("Tait radio on {port}: garbled reply dropped: {line}", port, Printable(line));
+                };
                 radio.ProgressReceived += (_, p) => counts.Progress(p.Type.ToString());
                 radio.ErrorReceived += (_, _) => counts.Error();
                 radio.CarrierSenseChanged += (_, _) => counts.Edge();
@@ -158,6 +176,10 @@ public sealed class TaitRadioLink : IAsyncDisposable
         cts.Dispose();
     }
 
+    // Control characters in a garbled line would mangle the journal
+    private static string Printable(string line) =>
+        string.Concat(line.Select(c => c is >= ' ' and <= '~' ? c.ToString() : $"<{(int)c:X2}>"));
+
     // What the radio sent in the last minute, for the log: every message (including the answers
     // to our queries), the unsolicited progress messages by type, carrier edges and unsolicited
     // errors. A radio flooding progress messages would show here when its reads slow down.
@@ -165,11 +187,17 @@ public sealed class TaitRadioLink : IAsyncDisposable
     {
         private readonly object gate = new();
         private readonly Dictionary<string, int> progress = [];
-        private int messages, errors, edges;
+        private int messages, errors, edges, garbled, implausible;
 
         public void Message() { lock (gate) messages++; }
         public void Error() { lock (gate) errors++; }
         public void Edge() { lock (gate) edges++; }
+
+        /// <summary>Counts a dropped line; true while this minute's ones are still worth logging.</summary>
+        public bool Garbled() { lock (gate) return ++garbled + implausible <= MaxRepliesLoggedPerMinute; }
+
+        /// <summary>Counts an impossible RSSI reading; true while still worth logging.</summary>
+        public bool Implausible() { lock (gate) return garbled + ++implausible <= MaxRepliesLoggedPerMinute; }
 
         public void Progress(string type)
         {
@@ -182,9 +210,9 @@ public sealed class TaitRadioLink : IAsyncDisposable
             lock (gate)
             {
                 var byType = progress.Count == 0 ? "none" : string.Join(" ", progress.OrderByDescending(p => p.Value).Select(p => $"{p.Key}x{p.Value}"));
-                var line = $"radio sent {messages} messages: progress {byType}, {edges} carrier edges, {errors} errors";
+                var line = $"radio sent {messages} messages: progress {byType}, {edges} carrier edges, {errors} errors, {garbled} garbled, {implausible} implausible RSSI";
                 progress.Clear();
-                messages = errors = edges = 0;
+                messages = errors = edges = garbled = implausible = 0;
                 return line;
             }
         }
