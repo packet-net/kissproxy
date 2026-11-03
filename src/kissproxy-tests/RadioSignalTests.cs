@@ -269,6 +269,29 @@ public class RadioSignalTests : IDisposable
     }
 
     [Fact]
+    public async Task SamplerThread_SaysWhyReadsFailed()
+    {
+        long ticks = T0.Ticks;
+        var lines = new List<string>();
+        var m = new RadioSignalMonitor(new FakeRadio { FailEvery = 3 }, "70cm", clock: () => new DateTime(Interlocked.Add(ref ticks, TimeSpan.TicksPerSecond), DateTimeKind.Utc),
+            log: line => { lock (lines) lines.Add(line); });
+
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (lines) if (lines.Count > 0) break;
+            await Task.Delay(20);
+        }
+        await m.DisposeAsync();
+
+        lock (lines)
+        {
+            lines.Should().NotBeEmpty();
+            lines[0].Should().MatchRegex(@" [1-9][0-9]* failed \(TimeoutException: no answer x[1-9][0-9]*\), noise floor ");
+        }
+    }
+
+    [Fact]
     public void RadioReportingLate_StillGetsTheFramesReadings()
     {
         // GB7RDG's 70cm radio at 9600 baud: the NinoTNC delivers a short RR before the radio
@@ -462,7 +485,12 @@ public class RadioSignalTests : IDisposable
         public bool? Busy { get; set; } = false;
         public bool? ChannelBusy => Busy;
         public event EventHandler<CarrierSenseChange>? CarrierSenseChanged;
-        public ValueTask<float> ReadRssiDbmAsync(CancellationToken cancellationToken = default) => ValueTask.FromResult(-120f);
+        private int reads;
+        public int FailEvery { get; init; }
+        public ValueTask<float> ReadRssiDbmAsync(CancellationToken cancellationToken = default) =>
+            FailEvery > 0 && Interlocked.Increment(ref reads) % FailEvery == 0
+                ? ValueTask.FromException<float>(new TimeoutException("no answer"))
+                : ValueTask.FromResult(-120f);
         public ValueTask SetTransmitterAsync(bool transmit, CancellationToken cancellationToken = default) => ValueTask.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
         public void Raise(bool busy, DateTimeOffset at) => CarrierSenseChanged?.Invoke(this, new CarrierSenseChange(busy, at));
