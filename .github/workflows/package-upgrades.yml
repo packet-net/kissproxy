@@ -1,0 +1,81 @@
+name: package upgrades
+
+# Daily and on demand: upgrade NuGet packages (same major version), then build and
+# test, and push straight to main only if that is green. There is no ci.yml here,
+# so the build and test are the plain solution commands. The projects target
+# net8.0, so the 8.0 runtime is installed alongside the SDK for the tests.
+# If the full run fails, the security step pins only the vulnerable packages and
+# tries again, so a breaking upgrade never blocks a security fix.
+
+on:
+  schedule:
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: package-upgrades
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.x
+            8.0.x
+
+      - name: Upgrade, build and test
+        id: full
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/bump-packages.py src/kissproxy.sln | tee "$RUNNER_TEMP/upgrades.txt"
+          dotnet build src/kissproxy.sln --nologo
+          dotnet test src/kissproxy.sln --nologo --no-build
+
+      - name: Security fixes only
+        id: security
+        if: steps.full.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git reset --hard
+          git clean -fdx -e .dotnet
+          python3 scripts/bump-packages.py src/kissproxy.sln --vulnerable-only | tee "$RUNNER_TEMP/upgrades.txt"
+          dotnet build src/kissproxy.sln --nologo
+          dotnet test src/kissproxy.sln --nologo --no-build
+
+      - name: Commit and push
+        if: success()
+        shell: bash
+        env:
+          SECURITY_RAN: ${{ steps.security.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          git add -u
+          if git diff --cached --quiet; then
+            echo "nothing to upgrade"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ "$SECURITY_RAN" = "true" ]; then
+            subject="chore(deps): security package fixes"
+          else
+            subject="chore(deps): package upgrades"
+          fi
+          { echo "$subject"; echo; cat "$RUNNER_TEMP/upgrades.txt"; } > "$RUNNER_TEMP/commit-msg.txt"
+          git commit -F "$RUNNER_TEMP/commit-msg.txt"
+          git pull --rebase origin main
+          git push origin HEAD:main
