@@ -189,7 +189,7 @@ public class LinkTrackerTests : IDisposable
     public void Sqlite_FlushQueryAndStateSurvivesRestart()
     {
         var dbPath = Path.Combine(tempDir, "frames.db");
-        using (var sqlStore = new FrameStore(dbPath, NullLogger.Instance, flushInterval: TimeSpan.Zero))
+        using (var sqlStore = new FrameStore(dbPath, NullLogger.Instance, flushInterval: TimeSpan.Zero, clock: () => T0))
         {
             sqlStore.IsPersistent.Should().BeTrue();
             var m = new LinkMonitor(sqlStore, null, TimeSpan.Zero);
@@ -211,7 +211,7 @@ public class LinkTrackerTests : IDisposable
             activity.Should().ContainSingle(a => a.Remote == "GB7WIN" && a.Received == 2 && a.Transmitted == 1);
         } // Dispose flushes
 
-        using var reopened = new FrameStore(dbPath, NullLogger.Instance, flushInterval: TimeSpan.Zero);
+        using var reopened = new FrameStore(dbPath, NullLogger.Instance, flushInterval: TimeSpan.Zero, clock: () => T0);
         reopened.LoadLocalCalls().Should().Contain("M0LTE");
         var restarted = new LinkMonitor(reopened, null, TimeSpan.Zero);
         restarted.LiveLinks.Should().ContainSingle(l => l.Remote == "GB7WIN" && l.State == LinkStates.Connected);
@@ -379,7 +379,7 @@ public class LinkTrackerTests : IDisposable
     public void CallsLearnedFromDigipeating_ArePurgedOnOpen()
     {
         var dbPath = Path.Combine(tempDir, "purge.db");
-        using (var s = new FrameStore(dbPath, NullLogger.Instance, flushInterval: TimeSpan.Zero))
+        using (var s = new FrameStore(dbPath, NullLogger.Instance, flushInterval: TimeSpan.Zero, clock: () => T0))
         {
             var m = new LinkMonitor(s, "GB7RDG", TimeSpan.Zero);
             m.Record("2m", true, FrameVia("M0ABC", "M0XYZ", ["GB7RDG*"], true, SABM), T0);
@@ -387,7 +387,7 @@ public class LinkTrackerTests : IDisposable
             s.AddLocalCall("M0ABC"); // as the deployed build of #11 would have
         }
 
-        using var reopened = new FrameStore(dbPath, NullLogger.Instance, flushInterval: TimeSpan.Zero);
+        using var reopened = new FrameStore(dbPath, NullLogger.Instance, flushInterval: TimeSpan.Zero, clock: () => T0);
         reopened.LoadLocalCalls().Should().BeEquivalentTo(["M0LTE"]);
     }
 

@@ -153,7 +153,7 @@ public class RadioSignalTests : IDisposable
         }
         SqliteConnection.ClearAllPools();
 
-        using var store = new FrameStore(dbPath, NullLogger.Instance, flushInterval: TimeSpan.Zero);
+        using var store = new FrameStore(dbPath, NullLogger.Instance, flushInterval: TimeSpan.Zero, clock: () => T0);
         store.IsPersistent.Should().BeTrue();
         store.QueryFrames(FrameStore.FromMs(0), FrameStore.FromMs(10), null, null, null, 0, 10, out var total);
         total.Should().Be(1);
